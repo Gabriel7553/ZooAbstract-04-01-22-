@@ -456,10 +456,8 @@ watchLevelPx   = watching ? (_watchIsLedgeBetter ? nearLedge : nearLVN) : float(
 watchLevelType = watching ? (_watchIsLedgeBetter ? "Ledge" : "LVN") : "—"
 
 // HVN check at current price
-binIdxNow = na(topP) or na(botP) or topP == botP ? na :
-     math.max(0, math.min(nbins - 1, math.floor((close - botP) / ((topP - botP) / nbins))))
-inHVN = na(binIdxNow) or na(pocVol) or pocVol <= 0 ? false :
-     array.get(bins, binIdxNow) / pocVol >= hvnPct
+binIdxNow = na(topP) or na(botP) or topP == botP ? na : math.max(0, math.min(nbins - 1, math.floor((close - botP) / ((topP - botP) / nbins))))
+inHVN = na(binIdxNow) or na(pocVol) or pocVol <= 0 ? false : array.get(bins, binIdxNow) / pocVol >= hvnPct
 
 // ===== SETUP & GRADE =========================================================
 // STRICT: only fire when actually at a level.
@@ -698,11 +696,8 @@ chooseTarget(bool isL, bool isS, float pe, float pr) =>
 
 [structTP, tpReason] = chooseTarget(isLong, isShort, provisionalEntry, structRisk)
 
-finalTP = not na(structTP) ? structTP :
-          isLong  ? provisionalEntry + atr * fallbackTP :
-          isShort ? provisionalEntry - atr * fallbackTP : float(na)
-finalTPReason = not na(structTP) ? tpReason :
-                (isLong or isShort ? "ATR fallback" : "—")
+finalTP = not na(structTP) ? structTP : isLong ? provisionalEntry + atr * fallbackTP : isShort ? provisionalEntry - atr * fallbackTP : float(na)
+finalTPReason = not na(structTP) ? tpReason : (isLong or isShort ? "ATR fallback" : "—")
 
 risk   = not na(structRisk) ? structRisk : float(na)
 reward = not na(finalTP) ? math.abs(finalTP - provisionalEntry) : float(na)
@@ -928,14 +923,8 @@ signalText = goLong ? "GO LONG" : goShort ? "GO SHORT" : caution ? "CAUTION" : s
 
 sideHint = goLong ? "LONG" : goShort ? "SHORT" : cautionLong ? "↓ long degr." : cautionShort ? "↑ short degr." : watchingLong ? "→ LONG lvl" : watchingShort ? "→ SHORT lvl" : bias == 1 ? "bull-bias" : bias == -1 ? "bear-bias" : "—"
 
-signalBg = goLong   ? color.new(color.lime,    20) :
-           goShort  ? color.new(color.red,     20) :
-           caution  ? color.new(color.fuchsia, 30) :
-           staged   ? color.new(color.orange,  30) :
-           watching ? color.new(color.yellow,  40) :
-                      color.new(color.gray,    60)
-signalFg = goLong or goShort or caution or staged ? color.white :
-           watching ? color.black : color.silver
+signalBg = goLong ? color.new(color.lime, 20) : goShort ? color.new(color.red, 20) : caution ? color.new(color.fuchsia, 30) : staged ? color.new(color.orange, 30) : watching ? color.new(color.yellow, 40) : color.new(color.gray, 60)
+signalFg = goLong or goShort or caution or staged ? color.white : watching ? color.black : color.silver
 
 confluenceStr = f_check(c1) + f_check(c2) + f_check(c3) + f_check(c4) +
                 f_check(c5) + f_check(c6) + (c7Use ? f_check(c7) : "·")
