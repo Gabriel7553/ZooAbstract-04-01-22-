@@ -92,8 +92,12 @@ isGC = str.contains(sym, "GC") or str.contains(sym, "MGC")
 
 // ===== TIMEFRAME + LOOKBACK ==================================================
 daysOf(string m) =>
-    m == "3D" ? 3 : m == "7D" ? 7 : m == "30D" ? 30 :
-    m == "90D" ? 90 : m == "180D" ? 180 : customD
+    out = m == "3D"   ? 3   :
+       m == "7D"      ? 7   :
+       m == "30D"     ? 30  :
+       m == "90D"     ? 90  :
+       m == "180D"    ? 180 : customD
+    out
 
 primaryDays = mode == "All" ? 90 : daysOf(mode)
 tfSec       = timeframe.in_seconds(timeframe.period)
