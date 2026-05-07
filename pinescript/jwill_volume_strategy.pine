@@ -597,25 +597,35 @@ pickTarget(bool isLongDir, float entry, float risk) =>
     names = array.new_string()
     if isLongDir
         if not na(nyH)    and nyH    > entry
-            array.push(cands, nyH);    array.push(names, "NY HoD")
+            array.push(cands, nyH)
+            array.push(names, "NY HoD")
         if not na(lonH)   and lonH   > entry
-            array.push(cands, lonH);   array.push(names, "London HoD")
+            array.push(cands, lonH)
+            array.push(names, "London HoD")
         if not na(asiaH)  and asiaH  > entry
-            array.push(cands, asiaH);  array.push(names, "Asia HoD")
+            array.push(cands, asiaH)
+            array.push(names, "Asia HoD")
         if not na(pdH)    and pdH    > entry
-            array.push(cands, pdH);    array.push(names, "PDH")
+            array.push(cands, pdH)
+            array.push(names, "PDH")
         if not na(vahPrice) and vahPrice > entry
-            array.push(cands, vahPrice); array.push(names, "VAH")
+            array.push(cands, vahPrice)
+            array.push(names, "VAH")
         if not na(devPOC) and devPOC  > entry
-            array.push(cands, devPOC); array.push(names, "dPOC")
+            array.push(cands, devPOC)
+            array.push(names, "dPOC")
         if not na(pocPrice) and pocPrice > entry
-            array.push(cands, pocPrice); array.push(names, "VP POC")
+            array.push(cands, pocPrice)
+            array.push(names, "VP POC")
         if not na(pwH)    and pwH    > entry
-            array.push(cands, pwH);    array.push(names, "PWH")
+            array.push(cands, pwH)
+            array.push(names, "PWH")
         if showMonthlyHL and not na(pmH) and pmH > entry
-            array.push(cands, pmH);    array.push(names, "PMH")
+            array.push(cands, pmH)
+            array.push(names, "PMH")
         if not na(ath)    and ath    > entry
-            array.push(cands, ath);    array.push(names, "ATH(vis)")
+            array.push(cands, ath)
+            array.push(names, "ATH(vis)")
         nL = array.size(lvnPx)
         if nL > 0
             for i = 0 to nL - 1
@@ -625,25 +635,35 @@ pickTarget(bool isLongDir, float entry, float risk) =>
                     array.push(names, "LVN above")
     else
         if not na(nyL)    and nyL    < entry
-            array.push(cands, nyL);    array.push(names, "NY LoD")
+            array.push(cands, nyL)
+            array.push(names, "NY LoD")
         if not na(lonL)   and lonL   < entry
-            array.push(cands, lonL);   array.push(names, "London LoD")
+            array.push(cands, lonL)
+            array.push(names, "London LoD")
         if not na(asiaL)  and asiaL  < entry
-            array.push(cands, asiaL);  array.push(names, "Asia LoD")
+            array.push(cands, asiaL)
+            array.push(names, "Asia LoD")
         if not na(pdL)    and pdL    < entry
-            array.push(cands, pdL);    array.push(names, "PDL")
+            array.push(cands, pdL)
+            array.push(names, "PDL")
         if not na(valPrice) and valPrice < entry
-            array.push(cands, valPrice); array.push(names, "VAL")
+            array.push(cands, valPrice)
+            array.push(names, "VAL")
         if not na(devPOC) and devPOC  < entry
-            array.push(cands, devPOC); array.push(names, "dPOC")
+            array.push(cands, devPOC)
+            array.push(names, "dPOC")
         if not na(pocPrice) and pocPrice < entry
-            array.push(cands, pocPrice); array.push(names, "VP POC")
+            array.push(cands, pocPrice)
+            array.push(names, "VP POC")
         if not na(pwL)    and pwL    < entry
-            array.push(cands, pwL);    array.push(names, "PWL")
+            array.push(cands, pwL)
+            array.push(names, "PWL")
         if showMonthlyHL and not na(pmL) and pmL < entry
-            array.push(cands, pmL);    array.push(names, "PML")
+            array.push(cands, pmL)
+            array.push(names, "PML")
         if not na(atl)    and atl    < entry
-            array.push(cands, atl);    array.push(names, "ATL(vis)")
+            array.push(cands, atl)
+            array.push(names, "ATL(vis)")
         nL = array.size(lvnPx)
         if nL > 0
             for i = 0 to nL - 1
