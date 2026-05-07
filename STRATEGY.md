@@ -101,7 +101,7 @@ Score 0–7 → grade.
 | 2 | At a level | Within ATR×proximity of an LVN or Ledge |
 | 3 | Level aligned with bias | Long: level ≤ price in bull. Short: level ≥ price in bear |
 | 4 | Not in HVN | Current price's bin < HVN threshold |
-| 5 | Volume regime favorable | healthy-trend slope OR exhaustion reversal OR absorption-proxy |
+| 5 | Volume regime favorable | healthy-trend slope OR exhaustion reversal |
 | 6 | EMA stack aligned | Bull: 9>21>50>200. Bear: inverse |
 | 7 | VWAP aligned | Long: above VWAP. Short: below VWAP |
 
@@ -111,16 +111,16 @@ Score 0–7 → grade.
 - **B**  = 2–4/7 → skip unless footprint is very strong.
 - **C**  = 0–1/7 → skip.
 
-The dashboard now shows each confluence as ✓/✗ with the actual value, so
-you can see exactly *why* a setup graded what it did. If VWAP confluence
-is disabled in inputs, scoring reverts to 6 confluences (totals adjust
-automatically).
+The dashboard shows the confluence pattern as a single string of
+checkmarks (e.g. `✓✓✓✓✗✓✓`) so you can see at a glance which boxes are
+checked. If VWAP confluence is disabled in inputs, the 7th slot shows `·`
+and scoring reverts to 6 confluences.
 
 The footprint trigger (absorption / exhaustion on the 1m) is still the
 **final gate** and is **not** computed by Pine — TradingView retail tier
-doesn't have order-flow data. The on-chart "AB" (absorption-proxy) and
-"EX" (exhaustion) markers are *hints* based on candle shape + volume —
-useful but not a substitute for actual footprint reads.
+doesn't have order-flow data. The on-chart "EX" exhaustion markers are
+volume-spike + direction hints; treat them as a useful signal, not a
+substitute for actual footprint reads in MotiveWave.
 
 ## Risk — Structural stops & targets (v2)
 
@@ -161,15 +161,21 @@ you those things.
 
 ## Marking on-chart
 
-- **EX** triangle (red above bar / green below bar) → exhaustion top/bottom.
-  Background also tints lightly so you can see it at a glance.
-- **AB** circle (cyan below / magenta above) → absorption-proxy candle
-  *at an LVN/Ledge only* (we don't want noise everywhere).
-- Profile boxes are pushed to the right of the last bar by `profileOffset`
-  bars so they don't overlap candles.
-- VP lines (LVN red dotted / Ledge orange / HVN cyan dashed) are drawn
-  with text labels on the right edge. Multi-VP "All" mode adds 5 colored
-  POC lines (white/yellow/orange/red/fuchsia for 3D/7D/30D/90D/180D).
+- **Volume profile** renders as a solid white opacity gradient on the
+  right edge. The brightest bar is the POC; ghostly bars are LVNs.
+  No 4-color rainbow — let your eye read density directly.
+- **EX** triangle (red above bar / green below bar) → exhaustion
+  top/bottom. Background also tints lightly so you can see it at a
+  glance.
+- **LVN / Ledge / HVN** still draw as horizontal lines (red dotted /
+  orange / cyan dashed) but without text labels — the line color tells
+  you what type. Removes the right-edge label clutter.
+- **Session / HTF lines** (PDH, PDL, NY/Asia/London H-L, weekly H-L,
+  ATH/ATL) only show their text label when within ~5 × ATR of price.
+  Far levels are still drawn but unlabeled.
+- **Multi-VP "All"** mode adds 5 colored POC lines
+  (white/yellow/orange/red/fuchsia for 3D/7D/30D/90D/180D), always
+  labeled — there are only 5.
 
 ## What we are explicitly NOT doing
 

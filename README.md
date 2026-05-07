@@ -21,15 +21,16 @@ ROADMAP.md                           What's next
 
 1. **TradingView** — paste `pinescript/jwill_volume_strategy.pine` into
    Pine Editor, save, add to your futures chart. The dashboard (top-right)
-   shows:
-   - Bias (BULL / BEAR / NEUTRAL)
-   - Setup side (LONG / SHORT / long-bias / short-bias / —)
+   is 8 rows for instant scan:
+   - **Big signal cell**: GO LONG / GO SHORT / WAIT / SKIP
    - Grade (A+ / A / B+ / B / C) with score X/7
-   - **Per-confluence ✓/✗** so you see WHY the grade is what it is
-   - Entry, **structural** Stop and Target with reason text
-     (e.g. `27450  (NY HoD)`, `27395  (LVN structural)`)
-   - R:R
-   - Context: HTF POC, dPOC (today's), VWAP, PDH/PDL, NY H/L, Asia H/L
+   - Confluence pattern (one row of 7 ✓/✗ — see at a glance which boxes
+     are checked)
+   - Entry
+   - **Structural** Stop with reason (e.g. `28705 · LVN structural`)
+   - **Structural** Target with reason (e.g. `28780 · NY HoD`)
+   - R:R (color-coded: lime ≥ 2R, yellow ≥ 1.5R, red below)
+   - Note: lookback + symbol
 2. **Volume Profile lookback** — pick a single horizon from the dropdown
    (3D/7D/30D/90D/180D/Custom) or pick **`All`** to overlay POCs from
    every lookback at once (color-coded).
@@ -56,7 +57,11 @@ ROADMAP.md                           What's next
 ## What's new in v2 (vs v1)
 
 - **EMAs (9/21/50/200) replace SMAs**, plus Session VWAP as a 7th confluence.
-- **Per-confluence breakdown** in the dashboard (no more black-box grade).
+- **8-row scannable dashboard** — big GO/WAIT/SKIP signal cell on top,
+  confluence pattern as one row of ✓/✗, structural stop/target with
+  reason text, color-coded R:R. Designed so you can decide in 1 second.
+- **Solid-white VP gradient** — opacity scales with volume, flush to the
+  price axis. Brightest bar = POC. No more 4-color rainbow.
 - **Structural stops & targets** — every TP has a reason
   (PDH / NY HoD / Asia HoD / LVN above / ATH-visible / etc.), every stop
   is anchored to the level being defended.
@@ -66,11 +71,10 @@ ROADMAP.md                           What's next
   dashed line. Solves the "POC is 1000 points away" problem on intraday.
 - **Session H/L lines** — Asia, London, NY H/L tracked live, plus
   prior-day, prior-week, optional prior-month, and visible-range ATH/ATL.
-- **Exhaustion + absorption-proxy markers on candles** — "EX" triangles
-  for exhaustion, "AB" circles for absorption-proxy *at LVNs/Ledges* only
-  (so you don't get noise everywhere).
-- **Profile pushed off the candles** — boxes drawn `profileOffset` bars
-  to the right of the last bar instead of on top of it.
+  Text labels only appear when level is within ~5 × ATR of price (no more
+  spaghetti on the right edge).
+- **EX exhaustion markers on candles** — triangles + faint background
+  tint for volume-spike exhaustion tops/bottoms.
 - **Per-symbol presets** — auto-detects NQ vs GC for VWAP / dPOC
   anchoring (RTH for NQ, daily for GC).
 - **Always-populated trade plan** — Entry/Stop/Target now show even on
