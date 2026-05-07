@@ -1,57 +1,103 @@
 //@version=6
 // =============================================================================
-// Jwill Volume Strategy — VP, LVN, Ledges, Daily Bias, Setup Grading
+// Jwill Volume Strategy v2 — VP, LVN, Ledges, EMAs+VWAP, Session levels,
+// Structural Stops/Targets, Exhaustion/Absorption markers, Multi-VP overlay
 // -----------------------------------------------------------------------------
-// Encodes the rules in STRATEGY.md. Builds a volume profile over a configurable
-// lookback (3D / 7D / 30D / 90D / 180D), classifies bins as HVN / LVN, locates
-// Ledges (HVN bin adjacent to an LVN bin), derives HTF bias from MA stack +
-// daily-style volume regime, then grades the current setup 0..6 and proposes
-// entry / stop / target / R:R.
+// What this version adds vs v1:
+//   * Per-confluence ✓/✗ rows in the dashboard so you see WHY a grade is what
+//     it is — no more black-box grade.
+//   * Entry/Stop/Target always populate when bias is set OR you're at a level,
+//     not only on A/A+. Stops and targets snap to STRUCTURE (level / PDH-PDL /
+//     session H-L / weekly H-L / ATH) with a reason string in the table.
+//   * Multi-VP: dropdown still works; "All" mode draws POCs of every lookback
+//     (3D/7D/30D/90D/180D) as colored thin lines so you don't lose context.
+//   * EMAs (9/21/50/200) replace SMAs; Session VWAP added as a 7th confluence.
+//   * Session/HTF level markers: prior-day H/L, today's Asia/London/NY H/L,
+//     prior-week H/L, optional prior-month H/L, visible-range ATH/ATL.
+//   * Developing POC (today's session) shown alongside HTF POC — solves the
+//     "POC is 1000pts away on a 1m chart" problem.
+//   * Exhaustion + absorption-proxy markers drawn ON the candles (not just
+//     the dashboard).
+//   * Profile boxes pushed RIGHT of the last bar via offset so they don't
+//     sit on top of the candles.
+//   * Per-symbol presets for NQ and GC (auto-detected by ticker root).
 //
-// Footprint absorption/exhaustion is NOT computed (no order flow on retail TV).
-// Confirm that manually on the 1m before pulling the trigger.
+// Footprint absorption/exhaustion confirmation is still manual on the 1m in
+// MotiveWave — TV retail tier has no order flow. The "absorption proxy" here
+// is a candle-shape heuristic; treat it as a hint, not a substitute.
 // =============================================================================
 
-indicator("Jwill Volume Strategy", "JVS", overlay=true,
-     max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+indicator("Jwill Volume Strategy v2", "JVS2", overlay=true,
+     max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=5000)
 
 // ===== INPUTS ================================================================
 gVP   = "Volume Profile"
-mode      = input.string("90D", "Lookback", options=["3D","7D","30D","90D","180D","Custom"], group=gVP)
-customD   = input.int(30,   "Custom lookback (days)", minval=1, group=gVP)
-nbins     = input.int(60,   "Profile bins", minval=20, maxval=200, group=gVP)
-hvnPct    = input.float(0.80, "HVN threshold (% of POC)", minval=0.5, maxval=1.0, step=0.05, group=gVP)
-lvnPct    = input.float(0.20, "LVN threshold (% of POC)", minval=0.05, maxval=0.5, step=0.05, group=gVP)
-showVP    = input.bool(true,  "Draw profile", group=gVP)
-showHVN   = input.bool(true,  "Highlight HVNs (cyan)", group=gVP)
-showLVN   = input.bool(true,  "Highlight LVNs (red dotted)", group=gVP)
-showLedge = input.bool(true,  "Highlight Ledges (orange)", group=gVP)
-profileWidth = input.int(60, "Profile draw width (bars)", minval=10, maxval=200, group=gVP)
+gB    = "Bias / Trend (EMAs + VWAP)"
+gLvl  = "Session & HTF Levels"
+gSet  = "Setup Grading & Risk"
+gDraw = "Drawing & Visuals"
 
-gB = "Daily Bias"
-maFast = input.int(20, "MA fast",  group=gB)
-maSlow = input.int(50, "MA slow",  group=gB)
-volAvgLen   = input.int(20,   "Volume average length", group=gB)
-volSpikeMul = input.float(1.8, "Volume spike multiplier", step=0.1, group=gB)
+mode      = input.string("90D", "Primary lookback",
+     options=["3D","7D","30D","90D","180D","Custom","All"], group=gVP)
+customD   = input.int(30,    "Custom lookback (days)", minval=1, group=gVP)
+nbins     = input.int(60,    "Profile bins", minval=20, maxval=200, group=gVP)
+hvnPct    = input.float(0.80,"HVN threshold (% of POC)", minval=0.5, maxval=1.0, step=0.05, group=gVP)
+lvnPct    = input.float(0.20,"LVN threshold (% of POC)", minval=0.05, maxval=0.5, step=0.05, group=gVP)
+showVP    = input.bool(true, "Draw profile boxes", group=gVP)
+showHVN   = input.bool(true, "HVN lines (cyan)", group=gVP)
+showLVN   = input.bool(true, "LVN lines (red dotted)", group=gVP)
+showLedge = input.bool(true, "Ledge lines (orange)", group=gVP)
+showDevPOC= input.bool(true, "Developing POC (today)", group=gVP)
+profileOffset = input.int(2,  "Profile offset from last bar", minval=0, maxval=50, group=gDraw)
+profileWidth  = input.int(40, "Profile width (bars)",         minval=10, maxval=200, group=gDraw)
 
-gS = "Setup Grading"
-atrLen   = input.int(14,   "ATR length", group=gS)
-slMult   = input.float(1.0, "Stop = ATR ×", step=0.1, group=gS)
-tpMult   = input.float(2.5, "Target = ATR ×", step=0.1, group=gS)
-proxMul  = input.float(0.25, "At-level proximity (ATR ×)", step=0.05, group=gS)
+ema1Len = input.int(9,   "EMA 1 (fast)",   group=gB)
+ema2Len = input.int(21,  "EMA 2 (medium)", group=gB)
+ema3Len = input.int(50,  "EMA 3 (swing)",  group=gB)
+ema4Len = input.int(200, "EMA 4 (HTF)",    group=gB)
+useVWAP      = input.bool(true,  "Session VWAP",       group=gB)
+useVWAPBands = input.bool(true,  "VWAP ±1σ bands",     group=gB)
+volAvgLen    = input.int(20,    "Volume average length", group=gB)
+volSpikeMul  = input.float(1.8, "Volume spike multiplier", step=0.1, group=gB)
 
-// ===== LOOKBACK BARS =========================================================
-daysBack = mode == "3D"   ?   3 :
-           mode == "7D"   ?   7 :
-           mode == "30D"  ?  30 :
-           mode == "90D"  ?  90 :
-           mode == "180D" ? 180 : customD
+showPDHL      = input.bool(true,  "Prior-day H/L",            group=gLvl)
+showSessHL    = input.bool(true,  "Today session H/L (Asia/London/NY)", group=gLvl)
+asiaSess      = input.session("1700-0300", "Asia session (exch tz)", group=gLvl)
+londonSess    = input.session("0300-0800", "London session",         group=gLvl)
+nySess        = input.session("0930-1600", "NY/RTH session",         group=gLvl)
+showWeeklyHL  = input.bool(true,  "Prior-week H/L",  group=gLvl)
+showMonthlyHL = input.bool(false, "Prior-month H/L", group=gLvl)
+showATH       = input.bool(true,  "Visible-range ATH/ATL", group=gLvl)
 
+atrLen     = input.int(14,    "ATR length",                       group=gSet)
+proxMul    = input.float(0.30,"At-level proximity (ATR ×)", step=0.05, group=gSet)
+slBufMul   = input.float(0.25,"Stop buffer beyond level (ATR ×)", step=0.05, group=gSet)
+minRR      = input.float(1.5, "Minimum acceptable R:R", step=0.1, group=gSet)
+fallbackTP = input.float(2.5, "Fallback TP (ATR ×) if no structural target", step=0.1, group=gSet)
+
+markExhaustion = input.bool(true, "Mark exhaustion candles on chart", group=gDraw)
+markAbsorption = input.bool(true, "Mark absorption proxy on chart",   group=gDraw)
+
+// ===== SYMBOL DETECTION ======================================================
+sym  = syminfo.ticker
+isNQ = str.contains(sym, "NQ") or str.contains(sym, "MNQ")
+isGC = str.contains(sym, "GC") or str.contains(sym, "MGC")
+
+// ===== TIMEFRAME + LOOKBACK ==================================================
+daysOf(string m) =>
+    out = m == "3D" ? 3 :
+       m == "7D" ? 7 :
+       m == "30D" ? 30 :
+       m == "90D" ? 90 :
+       m == "180D" ? 180 : customD
+    out
+
+primaryDays = mode == "All" ? 90 : daysOf(mode)
 tfSec       = timeframe.in_seconds(timeframe.period)
 barsPerDay  = tfSec > 0 ? math.max(1, math.floor(86400 / tfSec)) : 1
-lookback    = math.min(5000, daysBack * barsPerDay)
+primaryLB   = math.min(5000, primaryDays * barsPerDay)
 
-// ===== STATE =================================================================
+// ===== PROFILE STATE =========================================================
 var float[] bins      = array.new_float(nbins, 0.0)
 var float[] binPrice  = array.new_float(nbins, 0.0)
 var float   topP      = na
@@ -62,10 +108,24 @@ var float[] ledgePx   = array.new_float()
 var float[] lvnPx     = array.new_float()
 var float[] hvnPx     = array.new_float()
 
-var box[]  vpBoxes    = array.new_box()
-var line[] ledgeLines = array.new_line()
-var line[] lvnLines   = array.new_line()
-var line[] hvnLines   = array.new_line()
+// "All"-mode POCs
+var float pocAll3   = na
+var float pocAll7   = na
+var float pocAll30  = na
+var float pocAll90  = na
+var float pocAll180 = na
+
+// Drawing handles
+var box[]   vpBoxes      = array.new_box()
+var line[]  ledgeLines   = array.new_line()
+var line[]  lvnLines     = array.new_line()
+var line[]  hvnLines     = array.new_line()
+var line[]  mtfPocLines  = array.new_line()
+var label[] mtfPocLabs   = array.new_label()
+var line[]  sessionLines = array.new_line()
+var label[] sessionLabs  = array.new_label()
+var line    devPocLine   = na
+var label   devPocLabel  = na
 
 clearBoxes(arr) =>
     while array.size(arr) > 0
@@ -73,26 +133,56 @@ clearBoxes(arr) =>
 clearLines(arr) =>
     while array.size(arr) > 0
         line.delete(array.shift(arr))
+clearLabs(arr) =>
+    while array.size(arr) > 0
+        label.delete(array.shift(arr))
 
-// ===== BUILD PROFILE (last bar only — visualization & current state) =========
-if barstate.islast
+// ===== HELPERS (top-level so v6 accepts them) ================================
+nearestOf(arr, ref) =>
+    bestD = 1e20
+    best  = float(na)
+    for i = 0 to array.size(arr) - 1
+        p = array.get(arr, i)
+        d = math.abs(ref - p)
+        if d < bestD
+            bestD := d
+            best  := p
+    best
+
+drawHLine(float p, color c, string lbl, line[] lns, label[] labs) =>
+    if not na(p)
+        ln = line.new(bar_index - 100, p, bar_index, p,
+             color=color.new(c, 0), style=line.style_solid, extend=extend.right)
+        array.push(lns, ln)
+        lab = label.new(bar_index, p, lbl, style=label.style_label_left,
+             textcolor=c, color=color.new(color.black, 80), size=size.tiny)
+        array.push(labs, lab)
+
+drawPocLine(float p, color c, string lbl, line[] lns, label[] labs) =>
+    if not na(p)
+        ln = line.new(bar_index - 200, p, bar_index, p,
+             color=color.new(c, 0), style=line.style_solid, width=1, extend=extend.right)
+        array.push(lns, ln)
+        lab = label.new(bar_index, p, lbl, style=label.style_label_left,
+             textcolor=c, color=color.new(color.black, 70), size=size.tiny)
+        array.push(labs, lab)
+
+// ===== PROFILE BUILD =========================================================
+// Builds full bin profile for primary lookback, fills LVN/HVN/Ledge arrays.
+buildPrimary(int lb) =>
     array.fill(bins, 0.0)
     array.clear(ledgePx)
     array.clear(lvnPx)
     array.clear(hvnPx)
-
-    hi = ta.highest(high, lookback)
-    lo = ta.lowest(low,  lookback)
+    hi = ta.highest(high, lb)
+    lo = ta.lowest(low,  lb)
     topP := hi
     botP := lo
-    range_ = hi - lo
-    binSize = range_ / nbins
-
+    binSize = (hi - lo) / nbins
     if binSize > 0
         for i = 0 to nbins - 1
             array.set(binPrice, i, lo + (i + 0.5) * binSize)
-
-        for i = 0 to lookback - 1
+        for i = 0 to lb - 1
             h = high[i]
             l = low[i]
             v = volume[i]
@@ -103,12 +193,9 @@ if barstate.islast
                 per = v / spread
                 for b = sB to eB
                     array.set(bins, b, array.get(bins, b) + per)
-
         pocVol   := array.max(bins)
         pocIdx    = array.indexof(bins, pocVol)
         pocPrice := array.get(binPrice, pocIdx)
-
-        // classify bins
         if pocVol > 0
             for i = 0 to nbins - 1
                 ratio = array.get(bins, i) / pocVol
@@ -117,67 +204,100 @@ if barstate.islast
                     array.push(hvnPx, p)
                 if ratio <= lvnPct and ratio > 0.02
                     array.push(lvnPx, p)
-            // Ledge: HVN bin with an LVN bin immediately adjacent
             for i = 1 to nbins - 2
                 cur = array.get(bins, i)     / pocVol
                 up  = array.get(bins, i + 1) / pocVol
                 dn  = array.get(bins, i - 1) / pocVol
                 if cur >= hvnPct and (up <= lvnPct or dn <= lvnPct)
                     array.push(ledgePx, array.get(binPrice, i))
+    pocPrice
 
-// ===== DRAW VP ===============================================================
+// Lightweight POC-only build for "All" overlays.
+pocOnly(int lb) =>
+    bestP = float(na)
+    hi = ta.highest(high, lb)
+    lo = ta.lowest(low,  lb)
+    bs = (hi - lo) / nbins
+    if bs > 0
+        tmp = array.new_float(nbins, 0.0)
+        for i = 0 to lb - 1
+            h = high[i]
+            l = low[i]
+            v = volume[i]
+            if not na(h) and not na(l) and not na(v) and v > 0 and h >= l
+                sB = math.max(0, math.min(nbins - 1, math.floor((l - lo) / bs)))
+                eB = math.max(0, math.min(nbins - 1, math.floor((h - lo) / bs)))
+                spread = eB - sB + 1
+                per = v / spread
+                for b = sB to eB
+                    array.set(tmp, b, array.get(tmp, b) + per)
+        mx = array.max(tmp)
+        if mx > 0
+            bestP := lo + (array.indexof(tmp, mx) + 0.5) * bs
+    bestP
+
 if barstate.islast
-    clearBoxes(vpBoxes)
-    clearLines(ledgeLines)
-    clearLines(lvnLines)
-    clearLines(hvnLines)
+    buildPrimary(primaryLB)
+    if mode == "All"
+        pocAll3   := pocOnly(math.min(5000,   3 * barsPerDay))
+        pocAll7   := pocOnly(math.min(5000,   7 * barsPerDay))
+        pocAll30  := pocOnly(math.min(5000,  30 * barsPerDay))
+        pocAll90  := pocOnly(math.min(5000,  90 * barsPerDay))
+        pocAll180 := pocOnly(math.min(5000, 180 * barsPerDay))
 
-    if showVP and not na(topP) and not na(pocVol) and pocVol > 0
-        binSize = (topP - botP) / nbins
-        for i = 0 to nbins - 1
-            v = array.get(bins, i)
-            if v > 0
-                ratio = v / pocVol
-                w = math.max(1, math.floor(profileWidth * ratio))
-                p = array.get(binPrice, i)
-                isPOC = i == array.indexof(bins, pocVol)
-                isHVN = ratio >= hvnPct
-                isLVN = ratio <= lvnPct
-                col = isPOC ? color.new(color.yellow, 0)
-                  : isHVN ? color.new(color.aqua,   30)
-                  : isLVN ? color.new(color.red,    50)
-                  : color.new(color.gray, 75)
-                bx = box.new(left=bar_index, top=p + binSize/2,
-                     right=bar_index + w, bottom=p - binSize/2,
-                     bgcolor=col, border_color=col)
-                array.push(vpBoxes, bx)
+// ===== DEVELOPING (TODAY'S SESSION) POC ======================================
+isNewDay  = ta.change(time("D")) != 0
+inNY      = not na(time(timeframe.period, nySess))
+isNewSess = isNQ ? (inNY and not inNY[1]) : isNewDay
 
-    leftX  = math.max(0, bar_index - lookback)
-    if showLedge
-        for i = 0 to array.size(ledgePx) - 1
-            p = array.get(ledgePx, i)
-            ln = line.new(leftX, p, bar_index, p,
-                 color=color.new(color.orange, 0), width=2, extend=extend.right)
-            array.push(ledgeLines, ln)
-    if showLVN
-        for i = 0 to array.size(lvnPx) - 1
-            p = array.get(lvnPx, i)
-            ln = line.new(leftX, p, bar_index, p,
-                 color=color.new(color.red, 60), style=line.style_dotted, extend=extend.right)
-            array.push(lvnLines, ln)
-    if showHVN
-        for i = 0 to array.size(hvnPx) - 1
-            p = array.get(hvnPx, i)
-            ln = line.new(leftX, p, bar_index, p,
-                 color=color.new(color.aqua, 80), style=line.style_dashed, extend=extend.right)
-            array.push(hvnLines, ln)
+var float[] devBins = array.new_float(nbins, 0.0)
+var float   devTop  = na
+var float   devBot  = na
+var float   devPOC  = na
 
-// ===== DAILY-STYLE BIAS ======================================================
-ma1 = ta.sma(close, maFast)
-ma2 = ta.sma(close, maSlow)
-trendUp = close > ma1 and ma1 > ma2
-trendDn = close < ma1 and ma1 < ma2
+if isNewSess or barstate.isfirst
+    array.fill(devBins, 0.0)
+    devTop := high
+    devBot := low
 
+devTop := na(devTop) ? high : math.max(devTop, high)
+devBot := na(devBot) ? low  : math.min(devBot, low)
+
+if not na(devTop) and not na(devBot) and devTop > devBot
+    bs = (devTop - devBot) / nbins
+    if bs > 0
+        sB = math.max(0, math.min(nbins - 1, math.floor((low  - devBot) / bs)))
+        eB = math.max(0, math.min(nbins - 1, math.floor((high - devBot) / bs)))
+        spread = eB - sB + 1
+        per = volume / spread
+        for b = sB to eB
+            array.set(devBins, b, array.get(devBins, b) + per)
+        if barstate.islast
+            mx = array.max(devBins)
+            if mx > 0
+                devPOC := devBot + (array.indexof(devBins, mx) + 0.5) * bs
+
+// ===== EMAs ==================================================================
+ema1 = ta.ema(close, ema1Len)
+ema2 = ta.ema(close, ema2Len)
+ema3 = ta.ema(close, ema3Len)
+ema4 = ta.ema(close, ema4Len)
+
+stackedUp = ema1 > ema2 and ema2 > ema3 and ema3 > ema4
+stackedDn = ema1 < ema2 and ema2 < ema3 and ema3 < ema4
+trendUp   = close > ema2 and ema2 > ema3
+trendDn   = close < ema2 and ema2 < ema3
+
+// ===== SESSION VWAP ==========================================================
+inAsia    = not na(time(timeframe.period, asiaSess))
+inLondon  = not na(time(timeframe.period, londonSess))
+nySessStart = inNY and not inNY[1]
+vwapAnchor  = isNQ ? nySessStart : isNewDay
+[vwapMid, vwapUp, vwapDn] = ta.vwap(hlc3, vwapAnchor, 1)
+priceAboveVWAP = close > vwapMid
+priceBelowVWAP = close < vwapMid
+
+// ===== VOLUME REGIME =========================================================
 vAvg = ta.sma(volume, volAvgLen)
 volSpike = volume > vAvg * volSpikeMul
 upBar = close > open
@@ -187,40 +307,70 @@ priorDrop  = ta.falling(close, 3)
 exhaustionTop = volSpike and upBar and priorRally
 exhaustionBot = volSpike and dnBar and priorDrop
 
-// healthy trend: price slope same sign, volume slope shrinking
 priceSlope = ta.linreg(close,  10, 0) - ta.linreg(close,  10, 1)
 volSlope   = ta.linreg(volume, 10, 0) - ta.linreg(volume, 10, 1)
 healthyUp  = priceSlope > 0 and volSlope < 0
 healthyDn  = priceSlope < 0 and volSlope < 0
 
-bias =
-   trendUp and not exhaustionTop ?  1 :
-   trendDn and not exhaustionBot ? -1 : 0
-biasText = bias ==  1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
+// Absorption proxy — large vol + small body + opposing wick
+bodySize  = math.abs(close - open)
+rangeSize = high - low
+upWick    = high - math.max(close, open)
+loWick    = math.min(close, open) - low
+absorbBuy  = volSpike and bodySize < rangeSize * 0.35 and loWick > bodySize * 1.5
+absorbSell = volSpike and bodySize < rangeSize * 0.35 and upWick > bodySize * 1.5
 
-// ===== NEAREST LEVEL =========================================================
-nearestOf(arr) =>
-    bestD = 1e20
-    best = float(na)
-    for i = 0 to array.size(arr) - 1
-        p = array.get(arr, i)
-        d = math.abs(close - p)
-        if d < bestD
-            bestD := d
-            best  := p
-    best
+bias     = trendUp and not exhaustionTop ?  1 : trendDn and not exhaustionBot ? -1 : 0
+biasText = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
 
-nearLVN   = nearestOf(lvnPx)
-nearLedge = nearestOf(ledgePx)
+// ===== HTF LEVELS via security() =============================================
+[pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]],
+     lookahead=barmerge.lookahead_off)
+[pwH, pwL] = request.security(syminfo.tickerid, "W", [high[1], low[1]],
+     lookahead=barmerge.lookahead_off)
+[pmH, pmL] = request.security(syminfo.tickerid, "M", [high[1], low[1]],
+     lookahead=barmerge.lookahead_off)
 
-atr = ta.atr(atrLen)
+// Today's session H/L (in symbol/exchange tz)
+var float asiaH = na
+var float asiaL = na
+var float lonH  = na
+var float lonL  = na
+var float nyH   = na
+var float nyL   = na
+
+if isNewDay
+    asiaH := na
+    asiaL := na
+    lonH  := na
+    lonL  := na
+    nyH   := na
+    nyL   := na
+
+if inAsia
+    asiaH := na(asiaH) ? high : math.max(asiaH, high)
+    asiaL := na(asiaL) ? low  : math.min(asiaL, low)
+if inLondon
+    lonH := na(lonH) ? high : math.max(lonH, high)
+    lonL := na(lonL) ? low  : math.min(lonL, low)
+if inNY
+    nyH := na(nyH) ? high : math.max(nyH, high)
+    nyL := na(nyL) ? low  : math.min(nyL, low)
+
+ath = ta.highest(high, primaryLB)
+atl = ta.lowest(low,   primaryLB)
+
+// ===== AT-LEVEL CHECK ========================================================
+nearLVN    = nearestOf(lvnPx,   close)
+nearLedge  = nearestOf(ledgePx, close)
+atr        = ta.atr(atrLen)
 proxThresh = atr * proxMul
-atLVN   = not na(nearLVN)   and math.abs(close - nearLVN)   <= proxThresh
-atLedge = not na(nearLedge) and math.abs(close - nearLedge) <= proxThresh
-atLevel = atLVN or atLedge
-levelPx = atLedge ? nearLedge : atLVN ? nearLVN : float(na)
+atLVN      = not na(nearLVN)   and math.abs(close - nearLVN)   <= proxThresh
+atLedge    = not na(nearLedge) and math.abs(close - nearLedge) <= proxThresh
+atLevel    = atLVN or atLedge
+levelPx    = atLedge ? nearLedge : atLVN ? nearLVN : float(na)
+levelTypeStr = atLedge ? "Ledge" : atLVN ? "LVN" : "—"
 
-// in-HVN check (current price's bin density)
 binIdxNow = na(topP) or na(botP) or topP == botP ? na :
      math.max(0, math.min(nbins - 1, math.floor((close - botP) / ((topP - botP) / nbins))))
 inHVN = na(binIdxNow) or na(pocVol) or pocVol <= 0 ? false :
@@ -235,69 +385,327 @@ c2 = atLevel
 c3 = longSetup or shortSetup
 c4 = not inHVN
 c5 = healthyUp or healthyDn or exhaustionTop or exhaustionBot
-c6 = (bias ==  1 and ma1 > ma2) or (bias == -1 and ma1 < ma2)
+c6 = (bias ==  1 and stackedUp) or (bias == -1 and stackedDn)
+c7Use = useVWAP
+c7 = c7Use ? ((bias == 1 and priceAboveVWAP) or (bias == -1 and priceBelowVWAP)) : true
 
-score = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0) + (c5?1:0) + (c6?1:0)
-grade = score >= 6 ? "A+" :
-        score == 5 ? "A"  :
-        score == 4 ? "B+" :
-        score >= 2 ? "B"  : "C"
+score = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0) + (c5?1:0) + (c6?1:0) + (c7?1:0)
+total = c7Use ? 7 : 6
+grade = score >= total       ? "A+" :
+        score == total - 1   ? "A"  :
+        score == total - 2   ? "B+" :
+        score >= 2           ? "B"  : "C"
 
-side  = longSetup ? "LONG" : shortSetup ? "SHORT" : "—"
-entry = atLevel ? levelPx : close
-sl =
-   side == "LONG"  ? entry - atr * slMult :
-   side == "SHORT" ? entry + atr * slMult : float(na)
-tp =
-   side == "LONG"  ? entry + atr * tpMult :
-   side == "SHORT" ? entry - atr * tpMult : float(na)
-risk   = side != "—" ? math.abs(entry - sl) : float(na)
-reward = side != "—" ? math.abs(tp - entry) : float(na)
+sideHint = longSetup ? "LONG" : shortSetup ? "SHORT" :
+     bias ==  1 ? "long-bias" :
+     bias == -1 ? "short-bias" : "—"
+
+isLong  = longSetup  or (not atLevel and bias ==  1 and not inHVN)
+isShort = shortSetup or (not atLevel and bias == -1 and not inHVN)
+
+// ===== STRUCTURAL STOP / TARGET ==============================================
+provisionalEntry = atLevel ? levelPx : close
+
+structStop =
+   isLong and atLevel ? levelPx - atr * slBufMul :
+   isShort and atLevel ? levelPx + atr * slBufMul :
+   isLong  ? close - atr :
+   isShort ? close + atr : float(na)
+
+structStopReason =
+   isLong and atLevel ? levelTypeStr + " structural" :
+   isShort and atLevel ? levelTypeStr + " structural" :
+   isLong or isShort ? "ATR fallback" : "—"
+
+structRisk = not na(structStop) ? math.abs(provisionalEntry - structStop) : float(na)
+
+// Pick closest meaningful structural target that yields >= minRR.
+pickTarget(bool isLongDir, float entry, float risk) =>
+    cands = array.new_float()
+    names = array.new_string()
+    if isLongDir
+        if not na(nyH)   and nyH   > entry
+            array.push(cands, nyH)
+            array.push(names, "NY HoD")
+        if not na(lonH)  and lonH  > entry
+            array.push(cands, lonH)
+            array.push(names, "London HoD")
+        if not na(asiaH) and asiaH > entry
+            array.push(cands, asiaH)
+            array.push(names, "Asia HoD")
+        if not na(pdH)   and pdH   > entry
+            array.push(cands, pdH)
+            array.push(names, "PDH")
+        if not na(pwH)   and pwH   > entry
+            array.push(cands, pwH)
+            array.push(names, "PWH")
+        if showMonthlyHL and not na(pmH) and pmH > entry
+            array.push(cands, pmH)
+            array.push(names, "PMH")
+        if not na(ath)   and ath   > entry
+            array.push(cands, ath)
+            array.push(names, "ATH(vis)")
+        for i = 0 to array.size(lvnPx) - 1
+            p = array.get(lvnPx, i)
+            if p > entry
+                array.push(cands, p)
+                array.push(names, "LVN above")
+    else
+        if not na(nyL)   and nyL   < entry
+            array.push(cands, nyL)
+            array.push(names, "NY LoD")
+        if not na(lonL)  and lonL  < entry
+            array.push(cands, lonL)
+            array.push(names, "London LoD")
+        if not na(asiaL) and asiaL < entry
+            array.push(cands, asiaL)
+            array.push(names, "Asia LoD")
+        if not na(pdL)   and pdL   < entry
+            array.push(cands, pdL)
+            array.push(names, "PDL")
+        if not na(pwL)   and pwL   < entry
+            array.push(cands, pwL)
+            array.push(names, "PWL")
+        if showMonthlyHL and not na(pmL) and pmL < entry
+            array.push(cands, pmL)
+            array.push(names, "PML")
+        if not na(atl)   and atl   < entry
+            array.push(cands, atl)
+            array.push(names, "ATL(vis)")
+        for i = 0 to array.size(lvnPx) - 1
+            p = array.get(lvnPx, i)
+            if p < entry
+                array.push(cands, p)
+                array.push(names, "LVN below")
+    bestP = float(na)
+    bestR = ""
+    bestD = 1e20
+    for i = 0 to array.size(cands) - 1
+        p = array.get(cands, i)
+        rr = risk > 0 ? math.abs(p - entry) / risk : 0
+        if rr >= minRR
+            d = math.abs(p - entry)
+            if d < bestD
+                bestD := d
+                bestP := p
+                bestR := array.get(names, i)
+    [bestP, bestR]
+
+// Wrap the if/else-if/else into a function so we can destructure the tuple
+// return cleanly (Pine v6 ternaries don't support tuple branches).
+chooseTarget(bool isL, bool isS, float pe, float pr) =>
+    if isL
+        pickTarget(true, pe, pr)
+    else if isS
+        pickTarget(false, pe, pr)
+    else
+        [float(na), ""]
+
+[structTP, tpReason] = chooseTarget(isLong, isShort, provisionalEntry, structRisk)
+
+finalTP =
+   not na(structTP) ? structTP :
+   isLong  ? provisionalEntry + atr * fallbackTP :
+   isShort ? provisionalEntry - atr * fallbackTP : float(na)
+finalTPReason = not na(structTP) ? tpReason : (isLong or isShort ? "ATR fallback" : "—")
+
+risk   = not na(structRisk) ? structRisk : float(na)
+reward = not na(finalTP) ? math.abs(finalTP - provisionalEntry) : float(na)
 rr     = not na(risk) and risk > 0 ? reward / risk : float(na)
-points = reward
+
+// ===== DRAWING (last bar only) ===============================================
+if barstate.islast
+    clearBoxes(vpBoxes)
+    clearLines(ledgeLines)
+    clearLines(lvnLines)
+    clearLines(hvnLines)
+    clearLines(mtfPocLines)
+    clearLabs(mtfPocLabs)
+    clearLines(sessionLines)
+    clearLabs(sessionLabs)
+    if not na(devPocLine)
+        line.delete(devPocLine)
+        devPocLine := na
+    if not na(devPocLabel)
+        label.delete(devPocLabel)
+        devPocLabel := na
+
+    // Profile boxes — anchored OFFSET-RIGHT so they don't sit on candles.
+    if showVP and not na(topP) and not na(pocVol) and pocVol > 0
+        binSize = (topP - botP) / nbins
+        leftAnchor = bar_index + profileOffset
+        for i = 0 to nbins - 1
+            v = array.get(bins, i)
+            if v > 0
+                ratio = v / pocVol
+                w = math.max(1, math.floor(profileWidth * ratio))
+                p = array.get(binPrice, i)
+                isPOCi = i == array.indexof(bins, pocVol)
+                isHVNi = ratio >= hvnPct
+                isLVNi = ratio <= lvnPct
+                col = isPOCi ? color.new(color.yellow, 0)
+                  : isHVNi ? color.new(color.aqua,   30)
+                  : isLVNi ? color.new(color.red,    50)
+                  : color.new(color.gray,  75)
+                bx = box.new(left=leftAnchor, top=p + binSize/2,
+                     right=leftAnchor + w, bottom=p - binSize/2,
+                     bgcolor=col, border_color=col)
+                array.push(vpBoxes, bx)
+
+    leftX = math.max(0, bar_index - primaryLB)
+    if showLedge
+        for i = 0 to array.size(ledgePx) - 1
+            p = array.get(ledgePx, i)
+            ln = line.new(leftX, p, bar_index, p,
+                 color=color.new(color.orange, 0), width=2, extend=extend.right)
+            array.push(ledgeLines, ln)
+            lb = label.new(bar_index, p, "Ledge", style=label.style_label_left,
+                 color=color.new(color.orange, 80), textcolor=color.orange,
+                 size=size.tiny)
+            array.push(sessionLabs, lb)
+    if showLVN
+        for i = 0 to array.size(lvnPx) - 1
+            p = array.get(lvnPx, i)
+            ln = line.new(leftX, p, bar_index, p,
+                 color=color.new(color.red, 50), style=line.style_dotted, extend=extend.right)
+            array.push(lvnLines, ln)
+            lb = label.new(bar_index, p, "LVN", style=label.style_label_left,
+                 color=color.new(color.red, 80), textcolor=color.red,
+                 size=size.tiny)
+            array.push(sessionLabs, lb)
+    if showHVN
+        for i = 0 to array.size(hvnPx) - 1
+            p = array.get(hvnPx, i)
+            ln = line.new(leftX, p, bar_index, p,
+                 color=color.new(color.aqua, 80), style=line.style_dashed, extend=extend.right)
+            array.push(hvnLines, ln)
+
+    // Multi-VP POC overlay
+    if mode == "All"
+        drawPocLine(pocAll3,   color.white,   "POC 3D",   mtfPocLines, mtfPocLabs)
+        drawPocLine(pocAll7,   color.yellow,  "POC 7D",   mtfPocLines, mtfPocLabs)
+        drawPocLine(pocAll30,  color.orange,  "POC 30D",  mtfPocLines, mtfPocLabs)
+        drawPocLine(pocAll90,  color.red,     "POC 90D",  mtfPocLines, mtfPocLabs)
+        drawPocLine(pocAll180, color.fuchsia, "POC 180D", mtfPocLines, mtfPocLabs)
+
+    // Developing POC
+    if showDevPOC and not na(devPOC)
+        devPocLine := line.new(bar_index - 100, devPOC, bar_index, devPOC,
+             color=color.new(color.yellow, 0), style=line.style_dashed, width=2, extend=extend.right)
+        devPocLabel := label.new(bar_index, devPOC, "dPOC",
+             style=label.style_label_left, textcolor=color.yellow,
+             color=color.new(color.black, 70), size=size.small)
+
+    // Session levels
+    if showPDHL
+        drawHLine(pdH, color.silver, "PDH", sessionLines, sessionLabs)
+        drawHLine(pdL, color.silver, "PDL", sessionLines, sessionLabs)
+    if showSessHL
+        drawHLine(asiaH, color.new(#7e57c2, 0), "AsiaH", sessionLines, sessionLabs)
+        drawHLine(asiaL, color.new(#7e57c2, 0), "AsiaL", sessionLines, sessionLabs)
+        drawHLine(lonH,  color.new(#26a69a, 0), "LonH",  sessionLines, sessionLabs)
+        drawHLine(lonL,  color.new(#26a69a, 0), "LonL",  sessionLines, sessionLabs)
+        drawHLine(nyH,   color.new(#42a5f5, 0), "NYH",   sessionLines, sessionLabs)
+        drawHLine(nyL,   color.new(#42a5f5, 0), "NYL",   sessionLines, sessionLabs)
+    if showWeeklyHL
+        drawHLine(pwH, color.new(#bdbdbd, 30), "PWH", sessionLines, sessionLabs)
+        drawHLine(pwL, color.new(#bdbdbd, 30), "PWL", sessionLines, sessionLabs)
+    if showMonthlyHL
+        drawHLine(pmH, color.new(#9e9e9e, 30), "PMH", sessionLines, sessionLabs)
+        drawHLine(pmL, color.new(#9e9e9e, 30), "PML", sessionLines, sessionLabs)
+    if showATH
+        drawHLine(ath, color.new(#ffeb3b, 50), "ATH(v)", sessionLines, sessionLabs)
+        drawHLine(atl, color.new(#ffeb3b, 50), "ATL(v)", sessionLines, sessionLabs)
+
+// ===== ON-CANDLE EXHAUSTION / ABSORPTION MARKERS =============================
+plotshape(markExhaustion and exhaustionTop, "Exh Top",
+     style=shape.triangledown, location=location.abovebar,
+     color=color.new(color.red, 0), size=size.tiny, text="EX")
+plotshape(markExhaustion and exhaustionBot, "Exh Bot",
+     style=shape.triangleup, location=location.belowbar,
+     color=color.new(color.lime, 0), size=size.tiny, text="EX")
+plotshape(markAbsorption and absorbBuy and atLVN, "Absorb Buy",
+     style=shape.circle, location=location.belowbar,
+     color=color.new(color.aqua, 0), size=size.tiny, text="AB")
+plotshape(markAbsorption and absorbSell and atLVN, "Absorb Sell",
+     style=shape.circle, location=location.abovebar,
+     color=color.new(color.fuchsia, 0), size=size.tiny, text="AB")
+bgcolor(exhaustionTop ? color.new(color.red, 90) : exhaustionBot ? color.new(color.lime, 90) : na,
+     title="Exhaustion bg")
 
 // ===== DASHBOARD =============================================================
-var table dash = table.new(position.top_right, 2, 13,
+var table dash = table.new(position.top_right, 2, 22,
      bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
 
-f_color_bias() => bias ==  1 ? color.lime : bias == -1 ? color.red : color.yellow
-f_color_side() => side == "LONG" ? color.lime : side == "SHORT" ? color.red : color.gray
-f_color_grade() => score >= 6 ? color.lime : score >= 5 ? color.aqua : score >= 4 ? color.yellow : color.gray
-f_fmt(x) => na(x) ? "—" : str.tostring(x, format.mintick)
+f_color_bias()  => bias ==  1 ? color.lime : bias == -1 ? color.red : color.yellow
+f_color_side()  => isLong ? color.lime : isShort ? color.red : color.gray
+f_color_grade() => score >= total ? color.lime :
+                   score >= total - 1 ? color.aqua :
+                   score >= total - 2 ? color.yellow : color.gray
+f_fmt(x)        => na(x) ? "—" : str.tostring(x, format.mintick)
+f_check(b)      => b ? "✓" : "✗"
+f_chkColor(b)   => b ? color.lime : color.red
 
 if barstate.islast
     table.cell(dash, 0,  0, "Bias",   text_color=color.white, bgcolor=color.new(color.gray,40))
     table.cell(dash, 1,  0, biasText, text_color=f_color_bias(), bgcolor=color.new(color.gray,60))
     table.cell(dash, 0,  1, "Setup",  text_color=color.white)
-    table.cell(dash, 1,  1, side,     text_color=f_color_side())
+    table.cell(dash, 1,  1, sideHint, text_color=f_color_side())
     table.cell(dash, 0,  2, "Grade",  text_color=color.white)
-    table.cell(dash, 1,  2, grade + " (" + str.tostring(score) + "/6)", text_color=f_color_grade())
-    table.cell(dash, 0,  3, "@Level", text_color=color.white)
-    table.cell(dash, 1,  3, atLedge ? "Ledge" : atLVN ? "LVN" : inHVN ? "HVN(avoid)" : "none",
-                          text_color=atLedge or atLVN ? color.lime : inHVN ? color.red : color.gray)
-    table.cell(dash, 0,  4, "Entry",  text_color=color.white)
-    table.cell(dash, 1,  4, f_fmt(entry))
-    table.cell(dash, 0,  5, "Stop",   text_color=color.white)
-    table.cell(dash, 1,  5, f_fmt(sl), text_color=color.red)
-    table.cell(dash, 0,  6, "Target", text_color=color.white)
-    table.cell(dash, 1,  6, f_fmt(tp), text_color=color.lime)
-    table.cell(dash, 0,  7, "Points", text_color=color.white)
-    table.cell(dash, 1,  7, f_fmt(points))
-    table.cell(dash, 0,  8, "R:R",    text_color=color.white)
-    table.cell(dash, 1,  8, na(rr) ? "—" : str.tostring(rr, "#.##"))
-    table.cell(dash, 0,  9, "Trend",  text_color=color.white)
-    table.cell(dash, 1,  9, trendUp ? "UP" : trendDn ? "DOWN" : "flat",
-                          text_color=trendUp ? color.lime : trendDn ? color.red : color.yellow)
-    table.cell(dash, 0, 10, "Vol",    text_color=color.white)
-    table.cell(dash, 1, 10, exhaustionTop ? "EXH TOP" :
-                            exhaustionBot ? "EXH BOT" :
-                            healthyUp     ? "healthy↑" :
-                            healthyDn     ? "healthy↓" : "normal",
-                          text_color=exhaustionTop or exhaustionBot ? color.orange : color.gray)
-    table.cell(dash, 0, 11, "POC",    text_color=color.white)
-    table.cell(dash, 1, 11, f_fmt(pocPrice), text_color=color.yellow)
-    table.cell(dash, 0, 12, "Lookback", text_color=color.white)
-    table.cell(dash, 1, 12, str.tostring(daysBack) + "d / " + str.tostring(lookback) + "b")
+    table.cell(dash, 1,  2, grade + " (" + str.tostring(score) + "/" + str.tostring(total) + ")",
+         text_color=f_color_grade())
+    table.cell(dash, 0,  3, "1. HTF bias",        text_color=color.white)
+    table.cell(dash, 1,  3, f_check(c1) + " " + biasText, text_color=f_chkColor(c1))
+    table.cell(dash, 0,  4, "2. At level",        text_color=color.white)
+    table.cell(dash, 1,  4, f_check(c2) + " " + (atLedge ? "Ledge" : atLVN ? "LVN" : "—"),
+         text_color=f_chkColor(c2))
+    table.cell(dash, 0,  5, "3. Aligned w/ bias", text_color=color.white)
+    table.cell(dash, 1,  5, f_check(c3),          text_color=f_chkColor(c3))
+    table.cell(dash, 0,  6, "4. Not in HVN",      text_color=color.white)
+    table.cell(dash, 1,  6, f_check(c4),          text_color=f_chkColor(c4))
+    table.cell(dash, 0,  7, "5. Vol regime",      text_color=color.white)
+    volStr = exhaustionTop ? "EXH TOP" :
+             exhaustionBot ? "EXH BOT" :
+             healthyUp     ? "healthy↑" :
+             healthyDn     ? "healthy↓" :
+             absorbBuy     ? "absorb↑" :
+             absorbSell    ? "absorb↓" : "normal"
+    table.cell(dash, 1,  7, f_check(c5) + " " + volStr, text_color=f_chkColor(c5))
+    table.cell(dash, 0,  8, "6. EMA stack",       text_color=color.white)
+    emaStr = stackedUp ? "↑↑↑" : stackedDn ? "↓↓↓" : "mixed"
+    table.cell(dash, 1,  8, f_check(c6) + " " + emaStr, text_color=f_chkColor(c6))
+    table.cell(dash, 0,  9, "7. VWAP align",      text_color=color.white)
+    vwapStr = priceAboveVWAP ? "above" : priceBelowVWAP ? "below" : "at"
+    table.cell(dash, 1,  9, c7Use ? f_check(c7) + " " + vwapStr : "off",
+         text_color=c7Use ? f_chkColor(c7) : color.gray)
+    table.cell(dash, 0, 10, "Entry",  text_color=color.white)
+    table.cell(dash, 1, 10, f_fmt(provisionalEntry))
+    table.cell(dash, 0, 11, "Stop",   text_color=color.white)
+    table.cell(dash, 1, 11, f_fmt(structStop) + "  (" + structStopReason + ")",
+         text_color=color.red)
+    table.cell(dash, 0, 12, "Target", text_color=color.white)
+    table.cell(dash, 1, 12, f_fmt(finalTP) + "  (" + finalTPReason + ")",
+         text_color=color.lime)
+    table.cell(dash, 0, 13, "R:R",    text_color=color.white)
+    table.cell(dash, 1, 13, na(rr) ? "—" : str.tostring(rr, "#.##"))
+    table.cell(dash, 0, 14, "POC (HTF)",   text_color=color.white)
+    table.cell(dash, 1, 14, f_fmt(pocPrice), text_color=color.yellow)
+    table.cell(dash, 0, 15, "dPOC (today)", text_color=color.white)
+    table.cell(dash, 1, 15, f_fmt(devPOC),   text_color=color.yellow)
+    table.cell(dash, 0, 16, "VWAP",   text_color=color.white)
+    table.cell(dash, 1, 16, f_fmt(vwapMid),
+         text_color=priceAboveVWAP ? color.lime : color.red)
+    table.cell(dash, 0, 17, "PDH/PDL", text_color=color.white)
+    table.cell(dash, 1, 17, f_fmt(pdH) + " / " + f_fmt(pdL))
+    table.cell(dash, 0, 18, "NY H/L",  text_color=color.white)
+    table.cell(dash, 1, 18, f_fmt(nyH) + " / " + f_fmt(nyL))
+    table.cell(dash, 0, 19, "Asia H/L",text_color=color.white)
+    table.cell(dash, 1, 19, f_fmt(asiaH) + " / " + f_fmt(asiaL))
+    table.cell(dash, 0, 20, "Lookback",text_color=color.white)
+    table.cell(dash, 1, 20, str.tostring(primaryDays) + "d / " + str.tostring(primaryLB) + "b" +
+         (mode == "All" ? "  (+All POCs)" : ""))
+    table.cell(dash, 0, 21, "Symbol",  text_color=color.white)
+    table.cell(dash, 1, 21, sym + (isNQ ? " [NQ]" : isGC ? " [GC]" : ""))
 
 // ===== ALERTS ================================================================
 alertcondition(longSetup  and grade == "A+", "A+ Long",  "JVS A+ Long setup at level")
@@ -306,10 +714,28 @@ alertcondition(longSetup  and (grade == "A" or grade == "A+"),  "A/A+ Long",  "J
 alertcondition(shortSetup and (grade == "A" or grade == "A+"),  "A/A+ Short", "JVS A/A+ Short setup")
 alertcondition(exhaustionTop, "Exhaustion Top", "JVS volume-spike exhaustion top")
 alertcondition(exhaustionBot, "Exhaustion Bot", "JVS volume-spike exhaustion bottom")
+alertcondition(absorbBuy and atLVN,  "Absorption buy at LVN",  "JVS absorption-proxy buy at LVN/Ledge")
+alertcondition(absorbSell and atLVN, "Absorption sell at LVN", "JVS absorption-proxy sell at LVN/Ledge")
 
-// ===== PLOT TRADE LEVELS WHEN ACTIVE =========================================
-plot(side != "—" ? entry : na, "Entry",  color=color.new(color.white, 0), style=plot.style_circles, linewidth=2)
-plot(side != "—" ? sl    : na, "Stop",   color=color.new(color.red,   0), style=plot.style_circles, linewidth=2)
-plot(side != "—" ? tp    : na, "Target", color=color.new(color.lime,  0), style=plot.style_circles, linewidth=2)
-plot(ma1, "MA fast", color=color.new(color.yellow, 60))
-plot(ma2, "MA slow", color=color.new(color.orange, 60))
+// ===== PLOTS =================================================================
+plot(provisionalEntry, "Entry",
+     color=isLong or isShort ? color.new(color.white, 0) : na,
+     style=plot.style_circles, linewidth=2)
+plot(structStop, "Stop",
+     color=isLong or isShort ? color.new(color.red, 0) : na,
+     style=plot.style_circles, linewidth=2)
+plot(finalTP, "Target",
+     color=isLong or isShort ? color.new(color.lime, 0) : na,
+     style=plot.style_circles, linewidth=2)
+
+plot(ema1, "EMA 9",   color=color.new(color.yellow,   0), linewidth=1)
+plot(ema2, "EMA 21",  color=color.new(color.orange,   0), linewidth=1)
+plot(ema3, "EMA 50",  color=color.new(color.aqua,    20), linewidth=2)
+plot(ema4, "EMA 200", color=color.new(color.fuchsia, 20), linewidth=2)
+
+plot(useVWAP ? vwapMid : na, "VWAP",
+     color=color.new(color.white, 0), linewidth=2)
+plot(useVWAP and useVWAPBands ? vwapUp : na, "VWAP +1σ",
+     color=color.new(color.gray, 50))
+plot(useVWAP and useVWAPBands ? vwapDn : na, "VWAP -1σ",
+     color=color.new(color.gray, 50))
