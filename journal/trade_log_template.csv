@@ -1,0 +1,2 @@
+date,symbol,session,side,grade,score,entry,stop,target,exit,points,rr_planned,rr_realized,result,bias,bias_source,level_type,level_price,level_aligned,in_hvn,vol_regime,ma_aligned,footprint_trigger,trigger_type,htf_check,limit_or_trigger,notes
+2026-04-21,ES,RTH,LONG,A+,6,5234.25,5230.00,5247.00,5246.50,12.25,3.0,2.88,WIN,BULL,daily TBV + MAs,Ledge,5234.50,Y,N,healthy_up,Y,Y,absorption,Y,trigger,example row — delete me
