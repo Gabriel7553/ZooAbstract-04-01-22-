@@ -481,10 +481,7 @@ c7    = c7Use ? ((bias == 1 and priceAboveVWAP) or (bias == -1 and priceBelowVWA
 
 score = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0) + (c5?1:0) + (c6?1:0) + (c7?1:0)
 total = c7Use ? 7 : 6
-grade = score >= total     ? "A+" :
-        score == total - 1 ? "A"  :
-        score == total - 2 ? "B+" :
-        score >= 2         ? "B"  : "C"
+grade = score >= total ? "A+" : score == total - 1 ? "A" : score == total - 2 ? "B+" : score >= 2 ? "B" : "C"
 
 // ===== STRUCTURAL STOP =======================================================
 // Snaps to nearest named level beyond entry (within 3 ATR cap).
@@ -731,10 +728,7 @@ cautionLong  = hadGoLong  and (exhaustionTop or bias != 1  or not stackedUp)
 cautionShort = hadGoShort and (exhaustionBot or bias != -1 or not stackedDn)
 caution      = cautionLong or cautionShort
 
-state = goLong or goShort ? "SIGNALED" :
-        caution            ? "CAUTION"  :
-        staged             ? "STAGED"   :
-        watching           ? "WATCHING" : "IDLE"
+state = goLong or goShort ? "SIGNALED" : caution ? "CAUTION" : staged ? "STAGED" : watching ? "WATCHING" : "IDLE"
 
 showTrade = state == "SIGNALED" or state == "STAGED"
 
@@ -922,15 +916,7 @@ bgcolor(exhaustionTop ? color.new(color.red, 90) : exhaustionBot ? color.new(col
      title="Exhaustion bg")
 
 // ===== DASHBOARD =============================================================
-dashPosVal = dashPos == "top_left"      ? position.top_left      :
-             dashPos == "top_center"    ? position.top_center    :
-             dashPos == "top_right"     ? position.top_right     :
-             dashPos == "middle_left"   ? position.middle_left   :
-             dashPos == "middle_center" ? position.middle_center :
-             dashPos == "middle_right"  ? position.middle_right  :
-             dashPos == "bottom_left"   ? position.bottom_left   :
-             dashPos == "bottom_center" ? position.bottom_center :
-                                          position.bottom_right
+dashPosVal = dashPos == "top_left" ? position.top_left : dashPos == "top_center" ? position.top_center : dashPos == "top_right" ? position.top_right : dashPos == "middle_left" ? position.middle_left : dashPos == "middle_center" ? position.middle_center : dashPos == "middle_right" ? position.middle_right : dashPos == "bottom_left" ? position.bottom_left : dashPos == "bottom_center" ? position.bottom_center : position.bottom_right
 var table dash = table.new(dashPosVal, 2, 8,
      bgcolor=color.new(color.black, 20), border_width=1,
      border_color=color.new(color.gray, 60))
@@ -938,14 +924,9 @@ var table dash = table.new(dashPosVal, 2, 8,
 f_fmt(float x)  => na(x) ? "—" : str.tostring(x, format.mintick)
 f_check(bool b) => b ? "✓" : "✗"
 
-signalText = goLong  ? "GO LONG"   : goShort  ? "GO SHORT" :
-             caution ? "CAUTION"   : staged   ? "STAGED"   :
-             watching ? "WATCHING" : "IDLE"
+signalText = goLong ? "GO LONG" : goShort ? "GO SHORT" : caution ? "CAUTION" : staged ? "STAGED" : watching ? "WATCHING" : "IDLE"
 
-sideHint = goLong         ? "LONG"           : goShort        ? "SHORT"          :
-           cautionLong    ? "↓ long degr."   : cautionShort   ? "↑ short degr."  :
-           watchingLong   ? "→ LONG lvl"     : watchingShort  ? "→ SHORT lvl"    :
-           bias ==  1     ? "bull-bias"       : bias == -1     ? "bear-bias"      : "—"
+sideHint = goLong ? "LONG" : goShort ? "SHORT" : cautionLong ? "↓ long degr." : cautionShort ? "↑ short degr." : watchingLong ? "→ LONG lvl" : watchingShort ? "→ SHORT lvl" : bias == 1 ? "bull-bias" : bias == -1 ? "bear-bias" : "—"
 
 signalBg = goLong   ? color.new(color.lime,    20) :
            goShort  ? color.new(color.red,     20) :
