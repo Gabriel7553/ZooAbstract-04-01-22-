@@ -75,14 +75,18 @@ clearLines(arr) =>
         line.delete(array.shift(arr))
 
 // ===== BUILD PROFILE (last bar only — visualization & current state) =========
+// ta.highest/ta.lowest must be called every bar (Pine requirement)
+_hi = ta.highest(high, lookback)
+_lo = ta.lowest(low,  lookback)
+
 if barstate.islast
     array.fill(bins, 0.0)
     array.clear(ledgePx)
     array.clear(lvnPx)
     array.clear(hvnPx)
 
-    hi = ta.highest(high, lookback)
-    lo = ta.lowest(low,  lookback)
+    hi = _hi
+    lo = _lo
     topP := hi
     botP := lo
     range_ = hi - lo
@@ -193,10 +197,8 @@ volSlope   = ta.linreg(volume, 10, 0) - ta.linreg(volume, 10, 1)
 healthyUp  = priceSlope > 0 and volSlope < 0
 healthyDn  = priceSlope < 0 and volSlope < 0
 
-bias =
-   trendUp and not exhaustionTop ?  1 :
-   trendDn and not exhaustionBot ? -1 : 0
-biasText = bias ==  1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
+bias = trendUp and not exhaustionTop ? 1 : trendDn and not exhaustionBot ? -1 : 0
+biasText = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
 
 // ===== NEAREST LEVEL =========================================================
 nearestOf(arr) =>
@@ -238,19 +240,12 @@ c5 = healthyUp or healthyDn or exhaustionTop or exhaustionBot
 c6 = (bias ==  1 and ma1 > ma2) or (bias == -1 and ma1 < ma2)
 
 score = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0) + (c5?1:0) + (c6?1:0)
-grade = score >= 6 ? "A+" :
-        score == 5 ? "A"  :
-        score == 4 ? "B+" :
-        score >= 2 ? "B"  : "C"
+grade = score >= 6 ? "A+" : score == 5 ? "A" : score == 4 ? "B+" : score >= 2 ? "B" : "C"
 
 side  = longSetup ? "LONG" : shortSetup ? "SHORT" : "—"
 entry = atLevel ? levelPx : close
-sl =
-   side == "LONG"  ? entry - atr * slMult :
-   side == "SHORT" ? entry + atr * slMult : float(na)
-tp =
-   side == "LONG"  ? entry + atr * tpMult :
-   side == "SHORT" ? entry - atr * tpMult : float(na)
+sl = side == "LONG" ? entry - atr * slMult : side == "SHORT" ? entry + atr * slMult : float(na)
+tp = side == "LONG" ? entry + atr * tpMult : side == "SHORT" ? entry - atr * tpMult : float(na)
 risk   = side != "—" ? math.abs(entry - sl) : float(na)
 reward = side != "—" ? math.abs(tp - entry) : float(na)
 rr     = not na(risk) and risk > 0 ? reward / risk : float(na)
