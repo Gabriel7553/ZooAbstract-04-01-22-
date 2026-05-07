@@ -80,6 +80,10 @@ minRR        = input.float(1.5, "Minimum acceptable R:R", step=0.1, group=gSet)
 fallbackTP   = input.float(2.5, "Fallback TP (ATR ×) if no structural target", step=0.1, group=gSet)
 
 markExhaustion = input.bool(true, "Mark exhaustion candles on chart", group=gDraw)
+dashPos = input.string("top_right", "Dashboard position",
+     options=["top_right","top_center","top_left",
+              "middle_right","middle_center","middle_left",
+              "bottom_right","bottom_center","bottom_left"], group=gDraw)
 
 // ===== SYMBOL DETECTION ======================================================
 sym  = syminfo.ticker
@@ -727,21 +731,23 @@ if barstate.islast
         label.delete(tpLab)
         tpLab := na
 
-    // Profile bars — white gradient, POC = brightest
+    // Profile bars — anchored on the RIGHT, growing leftward (mirror of MotiveWave-style
+    // right-side fixed-range VP). POC = widest + brightest bar.
     if showVP and not na(topP) and not na(pocVol) and pocVol > 0
-        binSize    = (topP - botP) / nbins
-        leftAnchor = bar_index + profileOffset
+        binSize     = (topP - botP) / nbins
+        rightAnchor = bar_index + profileOffset
         for i = 0 to nbins - 1
             v = array.get(bins, i)
             if v > 0
                 ratio  = v / pocVol
                 w      = math.max(1, math.floor(profileWidth * ratio))
                 p      = array.get(binPrice, i)
-                transp = math.max(5, math.round(90 - 80 * ratio))
-                bx = box.new(left=leftAnchor, top=p + binSize / 2,
-                     right=leftAnchor + w, bottom=p - binSize / 2,
+                // Lower min-transparency floor so low-volume bins are still visible
+                transp = math.max(15, math.round(85 - 70 * ratio))
+                bx = box.new(left=rightAnchor - w, top=p + binSize / 2,
+                     right=rightAnchor, bottom=p - binSize / 2,
                      bgcolor=color.new(color.white, transp),
-                     border_color=color.new(color.white, 95))
+                     border_color=color.new(color.white, 90))
                 array.push(vpBoxes, bx)
 
     leftX = math.max(0, bar_index - primaryLB)
@@ -856,7 +862,16 @@ bgcolor(exhaustionTop ? color.new(color.red, 90) : exhaustionBot ? color.new(col
      title="Exhaustion bg")
 
 // ===== DASHBOARD =============================================================
-var table dash = table.new(position.top_right, 2, 8,
+dashPosVal = dashPos == "top_left"      ? position.top_left      :
+             dashPos == "top_center"    ? position.top_center    :
+             dashPos == "top_right"     ? position.top_right     :
+             dashPos == "middle_left"   ? position.middle_left   :
+             dashPos == "middle_center" ? position.middle_center :
+             dashPos == "middle_right"  ? position.middle_right  :
+             dashPos == "bottom_left"   ? position.bottom_left   :
+             dashPos == "bottom_center" ? position.bottom_center :
+                                          position.bottom_right
+var table dash = table.new(dashPosVal, 2, 8,
      bgcolor=color.new(color.black, 20), border_width=1,
      border_color=color.new(color.gray, 60))
 
