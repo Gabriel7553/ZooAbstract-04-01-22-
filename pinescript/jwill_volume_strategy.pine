@@ -168,7 +168,9 @@ drawPocLine(float p, color c, string lbl, line[] lns, label[] labs) =>
         array.push(labs, lab)
 
 // ===== PROFILE BUILD =========================================================
-// Builds full bin profile for primary lookback, fills LVN/HVN/Ledge arrays.
+// Returns [top, bot, pocPrice, pocVol] and mutates the bin/level arrays
+// in-place. We don't reassign module-level vars from inside the function
+// (Pine v6 forbids that — CE10088); the caller does the assignment.
 buildPrimary(int lb) =>
     array.fill(bins, 0.0)
     array.clear(ledgePx)
@@ -176,9 +178,9 @@ buildPrimary(int lb) =>
     array.clear(hvnPx)
     hi = ta.highest(high, lb)
     lo = ta.lowest(low,  lb)
-    topP := hi
-    botP := lo
     binSize = (hi - lo) / nbins
+    pPrice = float(na)
+    pVol   = float(na)
     if binSize > 0
         for i = 0 to nbins - 1
             array.set(binPrice, i, lo + (i + 0.5) * binSize)
@@ -193,24 +195,24 @@ buildPrimary(int lb) =>
                 per = v / spread
                 for b = sB to eB
                     array.set(bins, b, array.get(bins, b) + per)
-        pocVol   := array.max(bins)
-        pocIdx    = array.indexof(bins, pocVol)
-        pocPrice := array.get(binPrice, pocIdx)
-        if pocVol > 0
+        pVol   := array.max(bins)
+        pocIdx  = array.indexof(bins, pVol)
+        pPrice := array.get(binPrice, pocIdx)
+        if pVol > 0
             for i = 0 to nbins - 1
-                ratio = array.get(bins, i) / pocVol
+                ratio = array.get(bins, i) / pVol
                 p = array.get(binPrice, i)
                 if ratio >= hvnPct
                     array.push(hvnPx, p)
                 if ratio <= lvnPct and ratio > 0.02
                     array.push(lvnPx, p)
             for i = 1 to nbins - 2
-                cur = array.get(bins, i)     / pocVol
-                up  = array.get(bins, i + 1) / pocVol
-                dn  = array.get(bins, i - 1) / pocVol
+                cur = array.get(bins, i)     / pVol
+                up  = array.get(bins, i + 1) / pVol
+                dn  = array.get(bins, i - 1) / pVol
                 if cur >= hvnPct and (up <= lvnPct or dn <= lvnPct)
                     array.push(ledgePx, array.get(binPrice, i))
-    pocPrice
+    [hi, lo, pPrice, pVol]
 
 // Lightweight POC-only build for "All" overlays.
 pocOnly(int lb) =>
@@ -237,7 +239,11 @@ pocOnly(int lb) =>
     bestP
 
 if barstate.islast
-    buildPrimary(primaryLB)
+    [t_, b_, pp_, pv_] = buildPrimary(primaryLB)
+    topP     := t_
+    botP     := b_
+    pocPrice := pp_
+    pocVol   := pv_
     if mode == "All"
         pocAll3   := pocOnly(math.min(5000,   3 * barsPerDay))
         pocAll7   := pocOnly(math.min(5000,   7 * barsPerDay))
@@ -371,10 +377,8 @@ atLevel    = atLVN or atLedge
 levelPx    = atLedge ? nearLedge : atLVN ? nearLVN : float(na)
 levelTypeStr = atLedge ? "Ledge" : atLVN ? "LVN" : "—"
 
-binIdxNow = na(topP) or na(botP) or topP == botP ? na :
-     math.max(0, math.min(nbins - 1, math.floor((close - botP) / ((topP - botP) / nbins))))
-inHVN = na(binIdxNow) or na(pocVol) or pocVol <= 0 ? false :
-     array.get(bins, binIdxNow) / pocVol >= hvnPct
+binIdxNow = na(topP) or na(botP) or topP == botP ? na : math.max(0, math.min(nbins - 1, math.floor((close - botP) / ((topP - botP) / nbins))))
+inHVN     = na(binIdxNow) or na(pocVol) or pocVol <= 0 ? false : array.get(bins, binIdxNow) / pocVol >= hvnPct
 
 // ===== SETUP & GRADE =========================================================
 longSetup  = bias ==  1 and atLevel and not inHVN and not na(levelPx) and levelPx <= close
@@ -391,14 +395,9 @@ c7 = c7Use ? ((bias == 1 and priceAboveVWAP) or (bias == -1 and priceBelowVWAP))
 
 score = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0) + (c5?1:0) + (c6?1:0) + (c7?1:0)
 total = c7Use ? 7 : 6
-grade = score >= total       ? "A+" :
-        score == total - 1   ? "A"  :
-        score == total - 2   ? "B+" :
-        score >= 2           ? "B"  : "C"
+grade = score >= total ? "A+" : score == total - 1 ? "A" : score == total - 2 ? "B+" : score >= 2 ? "B" : "C"
 
-sideHint = longSetup ? "LONG" : shortSetup ? "SHORT" :
-     bias ==  1 ? "long-bias" :
-     bias == -1 ? "short-bias" : "—"
+sideHint = longSetup ? "LONG" : shortSetup ? "SHORT" : bias == 1 ? "long-bias" : bias == -1 ? "short-bias" : "—"
 
 isLong  = longSetup  or (not atLevel and bias ==  1 and not inHVN)
 isShort = shortSetup or (not atLevel and bias == -1 and not inHVN)
@@ -406,16 +405,9 @@ isShort = shortSetup or (not atLevel and bias == -1 and not inHVN)
 // ===== STRUCTURAL STOP / TARGET ==============================================
 provisionalEntry = atLevel ? levelPx : close
 
-structStop =
-   isLong and atLevel ? levelPx - atr * slBufMul :
-   isShort and atLevel ? levelPx + atr * slBufMul :
-   isLong  ? close - atr :
-   isShort ? close + atr : float(na)
+structStop = isLong and atLevel ? levelPx - atr * slBufMul : isShort and atLevel ? levelPx + atr * slBufMul : isLong ? close - atr : isShort ? close + atr : float(na)
 
-structStopReason =
-   isLong and atLevel ? levelTypeStr + " structural" :
-   isShort and atLevel ? levelTypeStr + " structural" :
-   isLong or isShort ? "ATR fallback" : "—"
+structStopReason = isLong and atLevel ? levelTypeStr + " structural" : isShort and atLevel ? levelTypeStr + " structural" : isLong or isShort ? "ATR fallback" : "—"
 
 structRisk = not na(structStop) ? math.abs(provisionalEntry - structStop) : float(na)
 
@@ -503,10 +495,7 @@ chooseTarget(bool isL, bool isS, float pe, float pr) =>
 
 [structTP, tpReason] = chooseTarget(isLong, isShort, provisionalEntry, structRisk)
 
-finalTP =
-   not na(structTP) ? structTP :
-   isLong  ? provisionalEntry + atr * fallbackTP :
-   isShort ? provisionalEntry - atr * fallbackTP : float(na)
+finalTP = not na(structTP) ? structTP : isLong ? provisionalEntry + atr * fallbackTP : isShort ? provisionalEntry - atr * fallbackTP : float(na)
 finalTPReason = not na(structTP) ? tpReason : (isLong or isShort ? "ATR fallback" : "—")
 
 risk   = not na(structRisk) ? structRisk : float(na)
@@ -639,9 +628,7 @@ var table dash = table.new(position.top_right, 2, 22,
 
 f_color_bias()  => bias ==  1 ? color.lime : bias == -1 ? color.red : color.yellow
 f_color_side()  => isLong ? color.lime : isShort ? color.red : color.gray
-f_color_grade() => score >= total ? color.lime :
-                   score >= total - 1 ? color.aqua :
-                   score >= total - 2 ? color.yellow : color.gray
+f_color_grade() => score >= total ? color.lime : score >= total - 1 ? color.aqua : score >= total - 2 ? color.yellow : color.gray
 f_fmt(x)        => na(x) ? "—" : str.tostring(x, format.mintick)
 f_check(b)      => b ? "✓" : "✗"
 f_chkColor(b)   => b ? color.lime : color.red
