@@ -1,33 +1,34 @@
 //@version=6
 // =============================================================================
-// Jwill Volume Strategy v2 — VP, LVN, Ledges, EMAs+VWAP, Session levels,
-// Structural Stops/Targets, Exhaustion/Absorption markers, Multi-VP overlay
+// Jwill Volume Strategy v2.1
 // -----------------------------------------------------------------------------
-// What this version adds vs v1:
-//   * Per-confluence ✓/✗ rows in the dashboard so you see WHY a grade is what
-//     it is — no more black-box grade.
-//   * Entry/Stop/Target always populate when bias is set OR you're at a level,
-//     not only on A/A+. Stops and targets snap to STRUCTURE (level / PDH-PDL /
-//     session H-L / weekly H-L / ATH) with a reason string in the table.
-//   * Multi-VP: dropdown still works; "All" mode draws POCs of every lookback
-//     (3D/7D/30D/90D/180D) as colored thin lines so you don't lose context.
-//   * EMAs (9/21/50/200) replace SMAs; Session VWAP added as a 7th confluence.
-//   * Session/HTF level markers: prior-day H/L, today's Asia/London/NY H/L,
-//     prior-week H/L, optional prior-month H/L, visible-range ATH/ATL.
-//   * Developing POC (today's session) shown alongside HTF POC — solves the
-//     "POC is 1000pts away on a 1m chart" problem.
-//   * Exhaustion + absorption-proxy markers drawn ON the candles (not just
-//     the dashboard).
-//   * Profile boxes pushed RIGHT of the last bar via offset so they don't
-//     sit on top of the candles.
-//   * Per-symbol presets for NQ and GC (auto-detected by ticker root).
-//
-// Footprint absorption/exhaustion confirmation is still manual on the 1m in
-// MotiveWave — TV retail tier has no order flow. The "absorption proxy" here
-// is a candle-shape heuristic; treat it as a hint, not a substitute.
+// Changes from v2:
+//   * isLong/isShort are now STRICT — only fire when price is AT a structural
+//     level (LVN or Ledge). No more dots/levels cluttering the chart when
+//     bias is set but price is miles from any level.
+//   * Multi-state dashboard: IDLE → WATCHING → STAGED → SIGNALED → CAUTION
+//     so you know what phase you're in at a glance.
+//   * "Approaching level" alert fires on transition into WATCHING (within
+//     watchZone ATR of a level, approaching from bias-correct direction).
+//   * STAGED fires at level with B+ or better; SIGNALED = A/A+ → GO signal.
+//   * CAUTION: tracks if a GO signal fired this session; alerts if conditions
+//     deteriorate afterward (exhaustion against, bias flip, stack loss).
+//   * c5 (volume regime) is now DIRECTIONAL: exhaustionBot counts for longs,
+//     exhaustionTop counts for shorts. Previously any exhaustion passed c5.
+//   * Structural stop now snaps to the nearest NAMED level beyond entry
+//     (session H/L, PDH/PDL, LVN, etc.) within 3 ATR, with a named reason.
+//     "ATR fallback" only if no structural level is close enough.
+//   * VAH / VAL (Value Area High/Low, 70% of volume) added as labeled lines
+//     and included as stop/target candidates alongside existing levels.
+//   * dPOC and HTF POC added as target candidates (explicit near-term magnets).
+//   * Exhaustion heuristic tightened: require 5-bar trend (was 3) and no
+//     volume spike on the immediately prior bar.
+//   * Entry/stop/target now drawn as labeled horizontal LINES only when
+//     STAGED or SIGNALED. Removed the circle plots that fire every bar.
+//   * Dashboard row 3 shows the approaching level info when WATCHING.
 // =============================================================================
 
-indicator("Jwill Volume Strategy v2", "JVS2", overlay=true,
+indicator("Jwill Volume Strategy v2.1", "JVS2", overlay=true,
      max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=5000)
 
 // ===== INPUTS ================================================================
@@ -43,10 +44,12 @@ customD   = input.int(30,    "Custom lookback (days)", minval=1, group=gVP)
 nbins     = input.int(60,    "Profile bins", minval=20, maxval=200, group=gVP)
 hvnPct    = input.float(0.80,"HVN threshold (% of POC)", minval=0.5, maxval=1.0, step=0.05, group=gVP)
 lvnPct    = input.float(0.20,"LVN threshold (% of POC)", minval=0.05, maxval=0.5, step=0.05, group=gVP)
+vaPct     = input.float(0.70,"Value Area (% of total volume)", minval=0.5, maxval=0.95, step=0.05, group=gVP)
 showVP    = input.bool(true, "Draw profile boxes", group=gVP)
 showHVN   = input.bool(true, "HVN lines (cyan)", group=gVP)
 showLVN   = input.bool(true, "LVN lines (red dotted)", group=gVP)
 showLedge = input.bool(true, "Ledge lines (orange)", group=gVP)
+showVA    = input.bool(true, "VAH / VAL lines", group=gVP)
 showDevPOC= input.bool(true, "Developing POC (today)", group=gVP)
 profileOffset = input.int(2,  "Profile offset from last bar", minval=0, maxval=50, group=gDraw)
 profileWidth  = input.int(40, "Profile width (bars)",         minval=10, maxval=200, group=gDraw)
@@ -55,28 +58,32 @@ ema1Len = input.int(9,   "EMA 1 (fast)",   group=gB)
 ema2Len = input.int(21,  "EMA 2 (medium)", group=gB)
 ema3Len = input.int(50,  "EMA 3 (swing)",  group=gB)
 ema4Len = input.int(200, "EMA 4 (HTF)",    group=gB)
-useVWAP      = input.bool(true,  "Session VWAP",       group=gB)
-useVWAPBands = input.bool(true,  "VWAP ±1σ bands",     group=gB)
-volAvgLen    = input.int(20,    "Volume average length", group=gB)
+useVWAP      = input.bool(true,  "Session VWAP",         group=gB)
+useVWAPBands = input.bool(true,  "VWAP ±1σ bands",       group=gB)
+volAvgLen    = input.int(20,    "Volume average length",  group=gB)
 volSpikeMul  = input.float(1.8, "Volume spike multiplier", step=0.1, group=gB)
 
-showPDHL      = input.bool(true,  "Prior-day H/L",            group=gLvl)
-showSessHL    = input.bool(true,  "Today session H/L (Asia/London/NY)", group=gLvl)
-asiaSess      = input.session("1700-0300", "Asia session (exch tz)", group=gLvl)
-londonSess    = input.session("0300-0800", "London session",         group=gLvl)
-nySess        = input.session("0930-1600", "NY/RTH session",         group=gLvl)
-showWeeklyHL  = input.bool(true,  "Prior-week H/L",  group=gLvl)
-showMonthlyHL = input.bool(false, "Prior-month H/L", group=gLvl)
+showPDHL      = input.bool(true,  "Prior-day H/L",                       group=gLvl)
+showSessHL    = input.bool(true,  "Today session H/L (Asia/London/NY)",   group=gLvl)
+asiaSess      = input.session("1700-0300", "Asia session (exch tz)",      group=gLvl)
+londonSess    = input.session("0300-0800", "London session",               group=gLvl)
+nySess        = input.session("0930-1600", "NY/RTH session",               group=gLvl)
+showWeeklyHL  = input.bool(true,  "Prior-week H/L",   group=gLvl)
+showMonthlyHL = input.bool(false, "Prior-month H/L",  group=gLvl)
 showATH       = input.bool(true,  "Visible-range ATH/ATL", group=gLvl)
 
-atrLen     = input.int(14,    "ATR length",                       group=gSet)
-proxMul    = input.float(0.30,"At-level proximity (ATR ×)", step=0.05, group=gSet)
-slBufMul   = input.float(0.25,"Stop buffer beyond level (ATR ×)", step=0.05, group=gSet)
-minRR      = input.float(1.5, "Minimum acceptable R:R", step=0.1, group=gSet)
-fallbackTP = input.float(2.5, "Fallback TP (ATR ×) if no structural target", step=0.1, group=gSet)
+atrLen       = input.int(14,    "ATR length",                          group=gSet)
+proxMul      = input.float(0.30,"At-level proximity (ATR ×)",  step=0.05, group=gSet)
+watchZoneMul = input.float(2.0, "Level watch zone (ATR ×)",    step=0.25, group=gSet)
+slBufMul     = input.float(0.25,"Stop buffer beyond level (ATR ×)", step=0.05, group=gSet)
+minRR        = input.float(1.5, "Minimum acceptable R:R", step=0.1, group=gSet)
+fallbackTP   = input.float(2.5, "Fallback TP (ATR ×) if no structural target", step=0.1, group=gSet)
 
 markExhaustion = input.bool(true, "Mark exhaustion candles on chart", group=gDraw)
-markAbsorption = input.bool(true, "Mark absorption proxy on chart",   group=gDraw)
+dashPos = input.string("top_right", "Dashboard position",
+     options=["top_right","top_center","top_left",
+              "middle_right","middle_center","middle_left",
+              "bottom_right","bottom_center","bottom_left"], group=gDraw)
 
 // ===== SYMBOL DETECTION ======================================================
 sym  = syminfo.ticker
@@ -85,12 +92,8 @@ isGC = str.contains(sym, "GC") or str.contains(sym, "MGC")
 
 // ===== TIMEFRAME + LOOKBACK ==================================================
 daysOf(string m) =>
-    out = m == "3D" ? 3 :
-       m == "7D" ? 7 :
-       m == "30D" ? 30 :
-       m == "90D" ? 90 :
-       m == "180D" ? 180 : customD
-    out
+    m == "3D" ? 3 : m == "7D" ? 7 : m == "30D" ? 30 :
+    m == "90D" ? 90 : m == "180D" ? 180 : customD
 
 primaryDays = mode == "All" ? 90 : daysOf(mode)
 tfSec       = timeframe.in_seconds(timeframe.period)
@@ -98,17 +101,18 @@ barsPerDay  = tfSec > 0 ? math.max(1, math.floor(86400 / tfSec)) : 1
 primaryLB   = math.min(5000, primaryDays * barsPerDay)
 
 // ===== PROFILE STATE =========================================================
-var float[] bins      = array.new_float(nbins, 0.0)
-var float[] binPrice  = array.new_float(nbins, 0.0)
-var float   topP      = na
-var float   botP      = na
-var float   pocPrice  = na
-var float   pocVol    = na
-var float[] ledgePx   = array.new_float()
-var float[] lvnPx     = array.new_float()
-var float[] hvnPx     = array.new_float()
+var float[] bins     = array.new_float(nbins, 0.0)
+var float[] binPrice = array.new_float(nbins, 0.0)
+var float   topP     = na
+var float   botP     = na
+var float   pocPrice = na
+var float   pocVol   = na
+var float   vahPrice = na   // Value Area High (70% boundary)
+var float   valPrice = na   // Value Area Low  (70% boundary)
+var float[] ledgePx  = array.new_float()
+var float[] lvnPx    = array.new_float()
+var float[] hvnPx    = array.new_float()
 
-// "All"-mode POCs
 var float pocAll3   = na
 var float pocAll7   = na
 var float pocAll30  = na
@@ -126,37 +130,57 @@ var line[]  sessionLines = array.new_line()
 var label[] sessionLabs  = array.new_label()
 var line    devPocLine   = na
 var label   devPocLabel  = na
+var line    vahLine      = na
+var line    valLine      = na
+var label   vahLab       = na
+var label   valLab       = na
+// Trade level lines — only drawn when STAGED or SIGNALED
+var line    entryLine    = na
+var line    stopLine     = na
+var line    tpLine       = na
+var label   entryLab     = na
+var label   stopLab      = na
+var label   tpLab        = na
 
-clearBoxes(arr) =>
+// ===== HELPERS ===============================================================
+clearBoxes(box[] arr) =>
     while array.size(arr) > 0
         box.delete(array.shift(arr))
-clearLines(arr) =>
+
+clearLines(line[] arr) =>
     while array.size(arr) > 0
         line.delete(array.shift(arr))
-clearLabs(arr) =>
+
+clearLabs(label[] arr) =>
     while array.size(arr) > 0
         label.delete(array.shift(arr))
 
-// ===== HELPERS (top-level so v6 accepts them) ================================
-nearestOf(arr, ref) =>
+nearestOf(float[] arr, float ref) =>
     bestD = 1e20
     best  = float(na)
-    for i = 0 to array.size(arr) - 1
-        p = array.get(arr, i)
-        d = math.abs(ref - p)
-        if d < bestD
-            bestD := d
-            best  := p
+    sz    = array.size(arr)
+    if sz > 0
+        for i = 0 to sz - 1
+            p = array.get(arr, i)
+            d = math.abs(ref - p)
+            if d < bestD
+                bestD := d
+                best  := p
     best
 
-drawHLine(float p, color c, string lbl, line[] lns, label[] labs) =>
+// Only show text label when level is within 5 ATR (avoids right-edge clutter)
+nearLabel(float p, float ref, float a) =>
+    not na(p) and not na(a) and math.abs(ref - p) <= a * 5.0
+
+drawHLine(float p, color c, string lbl, bool wantLabel, line[] lns, label[] labs) =>
     if not na(p)
         ln = line.new(bar_index - 100, p, bar_index, p,
              color=color.new(c, 0), style=line.style_solid, extend=extend.right)
         array.push(lns, ln)
-        lab = label.new(bar_index, p, lbl, style=label.style_label_left,
-             textcolor=c, color=color.new(color.black, 80), size=size.tiny)
-        array.push(labs, lab)
+        if wantLabel
+            lab = label.new(bar_index, p, lbl, style=label.style_label_left,
+                 textcolor=c, color=color.new(color.black, 80), size=size.tiny)
+            array.push(labs, lab)
 
 drawPocLine(float p, color c, string lbl, line[] lns, label[] labs) =>
     if not na(p)
@@ -168,82 +192,123 @@ drawPocLine(float p, color c, string lbl, line[] lns, label[] labs) =>
         array.push(labs, lab)
 
 // ===== PROFILE BUILD =========================================================
-// Builds full bin profile for primary lookback, fills LVN/HVN/Ledge arrays.
-buildPrimary(int lb) =>
-    array.fill(bins, 0.0)
-    array.clear(ledgePx)
-    array.clear(lvnPx)
-    array.clear(hvnPx)
+// Returns [hi, lo, pocPx, pocV, vah, val] — mutates bin/level arrays in-place.
+// Called every bar (Pine CW10003); heavy work only on barstate.islast.
+buildPrimary(int lb, bool active) =>
     hi = ta.highest(high, lb)
     lo = ta.lowest(low,  lb)
-    topP := hi
-    botP := lo
-    binSize = (hi - lo) / nbins
-    if binSize > 0
-        for i = 0 to nbins - 1
-            array.set(binPrice, i, lo + (i + 0.5) * binSize)
-        for i = 0 to lb - 1
-            h = high[i]
-            l = low[i]
-            v = volume[i]
-            if not na(h) and not na(l) and not na(v) and v > 0 and h >= l
-                sB = math.max(0, math.min(nbins - 1, math.floor((l - lo) / binSize)))
-                eB = math.max(0, math.min(nbins - 1, math.floor((h - lo) / binSize)))
-                spread = eB - sB + 1
-                per = v / spread
-                for b = sB to eB
-                    array.set(bins, b, array.get(bins, b) + per)
-        pocVol   := array.max(bins)
-        pocIdx    = array.indexof(bins, pocVol)
-        pocPrice := array.get(binPrice, pocIdx)
-        if pocVol > 0
+    pPrice = float(na)
+    pVol   = float(na)
+    vah_   = float(na)
+    val_   = float(na)
+    if active
+        array.fill(bins, 0.0)
+        array.clear(ledgePx)
+        array.clear(lvnPx)
+        array.clear(hvnPx)
+        binSize = (hi - lo) / nbins
+        if binSize > 0
             for i = 0 to nbins - 1
-                ratio = array.get(bins, i) / pocVol
-                p = array.get(binPrice, i)
-                if ratio >= hvnPct
-                    array.push(hvnPx, p)
-                if ratio <= lvnPct and ratio > 0.02
-                    array.push(lvnPx, p)
-            for i = 1 to nbins - 2
-                cur = array.get(bins, i)     / pocVol
-                up  = array.get(bins, i + 1) / pocVol
-                dn  = array.get(bins, i - 1) / pocVol
-                if cur >= hvnPct and (up <= lvnPct or dn <= lvnPct)
-                    array.push(ledgePx, array.get(binPrice, i))
-    pocPrice
+                array.set(binPrice, i, lo + (i + 0.5) * binSize)
+            for i = 0 to lb - 1
+                h = high[i]
+                l = low[i]
+                v = volume[i]
+                if not na(h) and not na(l) and not na(v) and v > 0 and h >= l
+                    sB = math.max(0, math.min(nbins - 1, math.floor((l - lo) / binSize)))
+                    eB = math.max(0, math.min(nbins - 1, math.floor((h - lo) / binSize)))
+                    spread = eB - sB + 1
+                    per = v / spread
+                    for b = sB to eB
+                        array.set(bins, b, array.get(bins, b) + per)
+            pVol   := array.max(bins)
+            pocIdx  = array.indexof(bins, pVol)
+            pPrice := array.get(binPrice, pocIdx)
+            if pVol > 0
+                // HVN / LVN / Ledge detection
+                for i = 0 to nbins - 1
+                    ratio = array.get(bins, i) / pVol
+                    p     = array.get(binPrice, i)
+                    if ratio >= hvnPct
+                        array.push(hvnPx, p)
+                    if ratio <= lvnPct and ratio > 0.02
+                        array.push(lvnPx, p)
+                for i = 1 to nbins - 2
+                    cur = array.get(bins, i)     / pVol
+                    up  = array.get(bins, i + 1) / pVol
+                    dn  = array.get(bins, i - 1) / pVol
+                    if cur >= hvnPct and (up <= lvnPct or dn <= lvnPct)
+                        array.push(ledgePx, array.get(binPrice, i))
+                // Value Area (70%): expand from POC outward
+                totalVol   = array.sum(bins)
+                targetVol  = totalVol * vaPct
+                accumulated = array.get(bins, pocIdx)
+                loIdx = pocIdx
+                hiIdx = pocIdx
+                while accumulated < targetVol and (loIdx > 0 or hiIdx < nbins - 1)
+                    addUp = hiIdx < nbins - 1 ? array.get(bins, hiIdx + 1) : 0.0
+                    addDn = loIdx > 0         ? array.get(bins, loIdx - 1) : 0.0
+                    if addUp >= addDn and hiIdx < nbins - 1
+                        hiIdx       += 1
+                        accumulated += addUp
+                    else if loIdx > 0
+                        loIdx       -= 1
+                        accumulated += addDn
+                    else
+                        hiIdx       += 1
+                        accumulated += addUp
+                binSz = (hi - lo) / nbins
+                vah_ := lo + (hiIdx + 1) * binSz
+                val_ := lo + loIdx       * binSz
+    [hi, lo, pPrice, pVol, vah_, val_]
 
-// Lightweight POC-only build for "All" overlays.
-pocOnly(int lb) =>
+// Lightweight POC-only build for "All" mode overlays
+pocOnly(int lb, bool active) =>
     bestP = float(na)
-    hi = ta.highest(high, lb)
-    lo = ta.lowest(low,  lb)
-    bs = (hi - lo) / nbins
-    if bs > 0
-        tmp = array.new_float(nbins, 0.0)
-        for i = 0 to lb - 1
-            h = high[i]
-            l = low[i]
-            v = volume[i]
-            if not na(h) and not na(l) and not na(v) and v > 0 and h >= l
-                sB = math.max(0, math.min(nbins - 1, math.floor((l - lo) / bs)))
-                eB = math.max(0, math.min(nbins - 1, math.floor((h - lo) / bs)))
-                spread = eB - sB + 1
-                per = v / spread
-                for b = sB to eB
-                    array.set(tmp, b, array.get(tmp, b) + per)
-        mx = array.max(tmp)
-        if mx > 0
-            bestP := lo + (array.indexof(tmp, mx) + 0.5) * bs
+    hi    = ta.highest(high, lb)
+    lo    = ta.lowest(low,  lb)
+    if active
+        bs = (hi - lo) / nbins
+        if bs > 0
+            tmp = array.new_float(nbins, 0.0)
+            for i = 0 to lb - 1
+                h = high[i]
+                l = low[i]
+                v = volume[i]
+                if not na(h) and not na(l) and not na(v) and v > 0 and h >= l
+                    sB = math.max(0, math.min(nbins - 1, math.floor((l - lo) / bs)))
+                    eB = math.max(0, math.min(nbins - 1, math.floor((h - lo) / bs)))
+                    spread = eB - sB + 1
+                    per = v / spread
+                    for b = sB to eB
+                        array.set(tmp, b, array.get(tmp, b) + per)
+            mx = array.max(tmp)
+            if mx > 0
+                bestP := lo + (array.indexof(tmp, mx) + 0.5) * bs
     bestP
 
+// Top-level calls — every bar, heavy work only on last bar
+[topP_, botP_, pocPrice_, pocVol_, vah__, val__] = buildPrimary(primaryLB, barstate.islast)
+allActive = barstate.islast and mode == "All"
+poc3_   = pocOnly(math.min(5000,   3 * barsPerDay), allActive)
+poc7_   = pocOnly(math.min(5000,   7 * barsPerDay), allActive)
+poc30_  = pocOnly(math.min(5000,  30 * barsPerDay), allActive)
+poc90_  = pocOnly(math.min(5000,  90 * barsPerDay), allActive)
+poc180_ = pocOnly(math.min(5000, 180 * barsPerDay), allActive)
+
 if barstate.islast
-    buildPrimary(primaryLB)
+    topP     := topP_
+    botP     := botP_
+    pocPrice := pocPrice_
+    pocVol   := pocVol_
+    vahPrice := vah__
+    valPrice := val__
     if mode == "All"
-        pocAll3   := pocOnly(math.min(5000,   3 * barsPerDay))
-        pocAll7   := pocOnly(math.min(5000,   7 * barsPerDay))
-        pocAll30  := pocOnly(math.min(5000,  30 * barsPerDay))
-        pocAll90  := pocOnly(math.min(5000,  90 * barsPerDay))
-        pocAll180 := pocOnly(math.min(5000, 180 * barsPerDay))
+        pocAll3   := poc3_
+        pocAll7   := poc7_
+        pocAll30  := poc30_
+        pocAll90  := poc90_
+        pocAll180 := poc180_
 
 // ===== DEVELOPING (TODAY'S SESSION) POC ======================================
 isNewDay  = ta.change(time("D")) != 0
@@ -289,8 +354,8 @@ trendUp   = close > ema2 and ema2 > ema3
 trendDn   = close < ema2 and ema2 < ema3
 
 // ===== SESSION VWAP ==========================================================
-inAsia    = not na(time(timeframe.period, asiaSess))
-inLondon  = not na(time(timeframe.period, londonSess))
+inAsia      = not na(time(timeframe.period, asiaSess))
+inLondon    = not na(time(timeframe.period, londonSess))
 nySessStart = inNY and not inNY[1]
 vwapAnchor  = isNQ ? nySessStart : isNewDay
 [vwapMid, vwapUp, vwapDn] = ta.vwap(hlc3, vwapAnchor, 1)
@@ -302,23 +367,17 @@ vAvg = ta.sma(volume, volAvgLen)
 volSpike = volume > vAvg * volSpikeMul
 upBar = close > open
 dnBar = close < open
-priorRally = ta.rising(close, 3)
-priorDrop  = ta.falling(close, 3)
-exhaustionTop = volSpike and upBar and priorRally
-exhaustionBot = volSpike and dnBar and priorDrop
+// Tightened: 5-bar trend required; no spike on prior bar (prevents chain-firing)
+priorRally  = ta.rising(close, 5)
+priorDrop   = ta.falling(close, 5)
+recentSpike = volume[1] > vAvg * volSpikeMul
+exhaustionTop = volSpike and upBar and priorRally and not recentSpike
+exhaustionBot = volSpike and dnBar and priorDrop  and not recentSpike
 
 priceSlope = ta.linreg(close,  10, 0) - ta.linreg(close,  10, 1)
 volSlope   = ta.linreg(volume, 10, 0) - ta.linreg(volume, 10, 1)
 healthyUp  = priceSlope > 0 and volSlope < 0
 healthyDn  = priceSlope < 0 and volSlope < 0
-
-// Absorption proxy — large vol + small body + opposing wick
-bodySize  = math.abs(close - open)
-rangeSize = high - low
-upWick    = high - math.max(close, open)
-loWick    = math.min(close, open) - low
-absorbBuy  = volSpike and bodySize < rangeSize * 0.35 and loWick > bodySize * 1.5
-absorbSell = volSpike and bodySize < rangeSize * 0.35 and upWick > bodySize * 1.5
 
 bias     = trendUp and not exhaustionTop ?  1 : trendDn and not exhaustionBot ? -1 : 0
 biasText = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
@@ -331,7 +390,7 @@ biasText = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
 [pmH, pmL] = request.security(syminfo.tickerid, "M", [high[1], low[1]],
      lookahead=barmerge.lookahead_off)
 
-// Today's session H/L (in symbol/exchange tz)
+// Today's session H/L
 var float asiaH = na
 var float asiaL = na
 var float lonH  = na
@@ -360,142 +419,221 @@ if inNY
 ath = ta.highest(high, primaryLB)
 atl = ta.lowest(low,   primaryLB)
 
-// ===== AT-LEVEL CHECK ========================================================
-nearLVN    = nearestOf(lvnPx,   close)
-nearLedge  = nearestOf(ledgePx, close)
+// ===== AT-LEVEL + WATCH-ZONE CHECK ===========================================
+nearLVN   = nearestOf(lvnPx,   close)
+nearLedge = nearestOf(ledgePx, close)
 atr        = ta.atr(atrLen)
 proxThresh = atr * proxMul
-atLVN      = not na(nearLVN)   and math.abs(close - nearLVN)   <= proxThresh
-atLedge    = not na(nearLedge) and math.abs(close - nearLedge) <= proxThresh
-atLevel    = atLVN or atLedge
-levelPx    = atLedge ? nearLedge : atLVN ? nearLVN : float(na)
+watchThresh = atr * watchZoneMul
+
+atLVN   = not na(nearLVN)   and math.abs(close - nearLVN)   <= proxThresh
+atLedge = not na(nearLedge) and math.abs(close - nearLedge) <= proxThresh
+atLevel = atLVN or atLedge
+levelPx = atLedge ? nearLedge : atLVN ? nearLVN : float(na)
 levelTypeStr = atLedge ? "Ledge" : atLVN ? "LVN" : "—"
 
+// WATCHING: within watchThresh but NOT yet atLevel.
+// LONG watch  = bull bias, level is below price (support), price dropping toward it.
+// SHORT watch = bear bias, level is above price (resistance), price rising toward it.
+lvnDistW   = not na(nearLVN)   ? math.abs(close - nearLVN)   : 1e20
+ledgeDistW = not na(nearLedge) ? math.abs(close - nearLedge) : 1e20
+
+watchingLong = bias == 1 and not atLevel and
+     ((not na(nearLVN)   and lvnDistW   <= watchThresh and close > nearLVN) or
+      (not na(nearLedge) and ledgeDistW <= watchThresh and close > nearLedge))
+watchingShort = bias == -1 and not atLevel and
+     ((not na(nearLVN)   and lvnDistW   <= watchThresh and close < nearLVN) or
+      (not na(nearLedge) and ledgeDistW <= watchThresh and close < nearLedge))
+watching = watchingLong or watchingShort
+
+// Which level are we watching?
+_watchIsLedgeBetter = not na(nearLedge) and ledgeDistW <= lvnDistW
+watchLevelPx   = watching ? (_watchIsLedgeBetter ? nearLedge : nearLVN) : float(na)
+watchLevelType = watching ? (_watchIsLedgeBetter ? "Ledge" : "LVN") : "—"
+
+// HVN check at current price
 binIdxNow = na(topP) or na(botP) or topP == botP ? na :
      math.max(0, math.min(nbins - 1, math.floor((close - botP) / ((topP - botP) / nbins))))
 inHVN = na(binIdxNow) or na(pocVol) or pocVol <= 0 ? false :
      array.get(bins, binIdxNow) / pocVol >= hvnPct
 
 // ===== SETUP & GRADE =========================================================
+// STRICT: only fire when actually at a level.
 longSetup  = bias ==  1 and atLevel and not inHVN and not na(levelPx) and levelPx <= close
 shortSetup = bias == -1 and atLevel and not inHVN and not na(levelPx) and levelPx >= close
+isLong  = longSetup
+isShort = shortSetup
 
 c1 = bias != 0
 c2 = atLevel
 c3 = longSetup or shortSetup
 c4 = not inHVN
-c5 = healthyUp or healthyDn or exhaustionTop or exhaustionBot
+// c5 DIRECTIONAL: regime must match bias direction
+c5 = (bias ==  1 and (healthyUp  or exhaustionBot)) or
+     (bias == -1 and (healthyDn  or exhaustionTop))
 c6 = (bias ==  1 and stackedUp) or (bias == -1 and stackedDn)
 c7Use = useVWAP
-c7 = c7Use ? ((bias == 1 and priceAboveVWAP) or (bias == -1 and priceBelowVWAP)) : true
+c7    = c7Use ? ((bias == 1 and priceAboveVWAP) or (bias == -1 and priceBelowVWAP)) : true
 
 score = (c1?1:0) + (c2?1:0) + (c3?1:0) + (c4?1:0) + (c5?1:0) + (c6?1:0) + (c7?1:0)
 total = c7Use ? 7 : 6
-grade = score >= total       ? "A+" :
-        score == total - 1   ? "A"  :
-        score == total - 2   ? "B+" :
-        score >= 2           ? "B"  : "C"
+grade = score >= total     ? "A+" :
+        score == total - 1 ? "A"  :
+        score == total - 2 ? "B+" :
+        score >= 2         ? "B"  : "C"
 
-sideHint = longSetup ? "LONG" : shortSetup ? "SHORT" :
-     bias ==  1 ? "long-bias" :
-     bias == -1 ? "short-bias" : "—"
-
-isLong  = longSetup  or (not atLevel and bias ==  1 and not inHVN)
-isShort = shortSetup or (not atLevel and bias == -1 and not inHVN)
-
-// ===== STRUCTURAL STOP / TARGET ==============================================
+// ===== STRUCTURAL STOP =======================================================
+// Snaps to nearest named level beyond entry (within 3 ATR cap).
+// Falls back to "ATR fallback" if nothing structural is close enough.
 provisionalEntry = atLevel ? levelPx : close
 
-structStop =
-   isLong and atLevel ? levelPx - atr * slBufMul :
-   isShort and atLevel ? levelPx + atr * slBufMul :
-   isLong  ? close - atr :
-   isShort ? close + atr : float(na)
+getStructStop(bool isLng, float ent, float atrV, float bufM, bool useM) =>
+    bp  = float(na)
+    bd  = 1e20
+    bn  = "ATR fallback"
+    cap = atrV * 3.0
+    if isLng
+        if not na(nyL)   and nyL   < ent and (ent - nyL)   < bd and (ent - nyL)   <= cap
+            bd := ent - nyL;   bp := nyL;   bn := "below NYL"
+        if not na(lonL)  and lonL  < ent and (ent - lonL)  < bd and (ent - lonL)  <= cap
+            bd := ent - lonL;  bp := lonL;  bn := "below LonL"
+        if not na(asiaL) and asiaL < ent and (ent - asiaL) < bd and (ent - asiaL) <= cap
+            bd := ent - asiaL; bp := asiaL; bn := "below AsiaL"
+        if not na(valPrice) and valPrice < ent and (ent - valPrice) < bd and (ent - valPrice) <= cap
+            bd := ent - valPrice; bp := valPrice; bn := "below VAL"
+        if not na(pdL)   and pdL   < ent and (ent - pdL)   < bd and (ent - pdL)   <= cap
+            bd := ent - pdL;   bp := pdL;   bn := "below PDL"
+        if not na(pwL)   and pwL   < ent and (ent - pwL)   < bd and (ent - pwL)   <= cap
+            bd := ent - pwL;   bp := pwL;   bn := "below PWL"
+        if useM and not na(pmL) and pmL < ent and (ent - pmL) < bd and (ent - pmL) <= cap
+            bd := ent - pmL;   bp := pmL;   bn := "below PML"
+        if not na(atl)   and atl   < ent and (ent - atl)   < bd and (ent - atl)   <= cap
+            bd := ent - atl;   bp := atl;   bn := "below ATL(v)"
+        nL = array.size(lvnPx)
+        if nL > 0
+            for i = 0 to nL - 1
+                p = array.get(lvnPx, i)
+                if p < ent
+                    d = ent - p
+                    if d < bd and d <= cap
+                        bd := d; bp := p; bn := "LVN structural"
+    else
+        if not na(nyH)   and nyH   > ent and (nyH   - ent) < bd and (nyH   - ent) <= cap
+            bd := nyH   - ent; bp := nyH;   bn := "above NYH"
+        if not na(lonH)  and lonH  > ent and (lonH  - ent) < bd and (lonH  - ent) <= cap
+            bd := lonH  - ent; bp := lonH;  bn := "above LonH"
+        if not na(asiaH) and asiaH > ent and (asiaH - ent) < bd and (asiaH - ent) <= cap
+            bd := asiaH - ent; bp := asiaH; bn := "above AsiaH"
+        if not na(vahPrice) and vahPrice > ent and (vahPrice - ent) < bd and (vahPrice - ent) <= cap
+            bd := vahPrice - ent; bp := vahPrice; bn := "above VAH"
+        if not na(pdH)   and pdH   > ent and (pdH   - ent) < bd and (pdH   - ent) <= cap
+            bd := pdH   - ent; bp := pdH;   bn := "above PDH"
+        if not na(pwH)   and pwH   > ent and (pwH   - ent) < bd and (pwH   - ent) <= cap
+            bd := pwH   - ent; bp := pwH;   bn := "above PWH"
+        if useM and not na(pmH) and pmH > ent and (pmH - ent) < bd and (pmH - ent) <= cap
+            bd := pmH   - ent; bp := pmH;   bn := "above PMH"
+        if not na(ath)   and ath   > ent and (ath   - ent) < bd and (ath   - ent) <= cap
+            bd := ath   - ent; bp := ath;   bn := "above ATH(v)"
+        nL = array.size(lvnPx)
+        if nL > 0
+            for i = 0 to nL - 1
+                p = array.get(lvnPx, i)
+                if p > ent
+                    d = p - ent
+                    if d < bd and d <= cap
+                        bd := d; bp := p; bn := "LVN structural"
+    stopPx = not na(bp) ? (isLng ? bp - atrV * bufM : bp + atrV * bufM) :
+             (isLng ? ent - atrV : ent + atrV)
+    [stopPx, bn]
 
-structStopReason =
-   isLong and atLevel ? levelTypeStr + " structural" :
-   isShort and atLevel ? levelTypeStr + " structural" :
-   isLong or isShort ? "ATR fallback" : "—"
+[rawStop, stopReason] = getStructStop(
+     isLong, provisionalEntry, atr, slBufMul, showMonthlyHL)
 
-structRisk = not na(structStop) ? math.abs(provisionalEntry - structStop) : float(na)
+structStop       = isLong or isShort ? rawStop    : float(na)
+structStopReason = isLong or isShort ? stopReason : "—"
+structRisk       = not na(structStop) ? math.abs(provisionalEntry - structStop) : float(na)
 
-// Pick closest meaningful structural target that yields >= minRR.
+// ===== STRUCTURAL TARGET =====================================================
+// dPOC and HTF POC added as near-term magnet candidates.
+// VAH/VAL added as candidates. Otherwise same priority ladder as strategy doc.
 pickTarget(bool isLongDir, float entry, float risk) =>
     cands = array.new_float()
     names = array.new_string()
     if isLongDir
-        if not na(nyH)   and nyH   > entry
-            array.push(cands, nyH)
-            array.push(names, "NY HoD")
-        if not na(lonH)  and lonH  > entry
-            array.push(cands, lonH)
-            array.push(names, "London HoD")
-        if not na(asiaH) and asiaH > entry
-            array.push(cands, asiaH)
-            array.push(names, "Asia HoD")
-        if not na(pdH)   and pdH   > entry
-            array.push(cands, pdH)
-            array.push(names, "PDH")
-        if not na(pwH)   and pwH   > entry
-            array.push(cands, pwH)
-            array.push(names, "PWH")
+        if not na(nyH)    and nyH    > entry
+            array.push(cands, nyH);    array.push(names, "NY HoD")
+        if not na(lonH)   and lonH   > entry
+            array.push(cands, lonH);   array.push(names, "London HoD")
+        if not na(asiaH)  and asiaH  > entry
+            array.push(cands, asiaH);  array.push(names, "Asia HoD")
+        if not na(pdH)    and pdH    > entry
+            array.push(cands, pdH);    array.push(names, "PDH")
+        if not na(vahPrice) and vahPrice > entry
+            array.push(cands, vahPrice); array.push(names, "VAH")
+        if not na(devPOC) and devPOC  > entry
+            array.push(cands, devPOC); array.push(names, "dPOC")
+        if not na(pocPrice) and pocPrice > entry
+            array.push(cands, pocPrice); array.push(names, "VP POC")
+        if not na(pwH)    and pwH    > entry
+            array.push(cands, pwH);    array.push(names, "PWH")
         if showMonthlyHL and not na(pmH) and pmH > entry
-            array.push(cands, pmH)
-            array.push(names, "PMH")
-        if not na(ath)   and ath   > entry
-            array.push(cands, ath)
-            array.push(names, "ATH(vis)")
-        for i = 0 to array.size(lvnPx) - 1
-            p = array.get(lvnPx, i)
-            if p > entry
-                array.push(cands, p)
-                array.push(names, "LVN above")
+            array.push(cands, pmH);    array.push(names, "PMH")
+        if not na(ath)    and ath    > entry
+            array.push(cands, ath);    array.push(names, "ATH(vis)")
+        nL = array.size(lvnPx)
+        if nL > 0
+            for i = 0 to nL - 1
+                p = array.get(lvnPx, i)
+                if p > entry
+                    array.push(cands, p)
+                    array.push(names, "LVN above")
     else
-        if not na(nyL)   and nyL   < entry
-            array.push(cands, nyL)
-            array.push(names, "NY LoD")
-        if not na(lonL)  and lonL  < entry
-            array.push(cands, lonL)
-            array.push(names, "London LoD")
-        if not na(asiaL) and asiaL < entry
-            array.push(cands, asiaL)
-            array.push(names, "Asia LoD")
-        if not na(pdL)   and pdL   < entry
-            array.push(cands, pdL)
-            array.push(names, "PDL")
-        if not na(pwL)   and pwL   < entry
-            array.push(cands, pwL)
-            array.push(names, "PWL")
+        if not na(nyL)    and nyL    < entry
+            array.push(cands, nyL);    array.push(names, "NY LoD")
+        if not na(lonL)   and lonL   < entry
+            array.push(cands, lonL);   array.push(names, "London LoD")
+        if not na(asiaL)  and asiaL  < entry
+            array.push(cands, asiaL);  array.push(names, "Asia LoD")
+        if not na(pdL)    and pdL    < entry
+            array.push(cands, pdL);    array.push(names, "PDL")
+        if not na(valPrice) and valPrice < entry
+            array.push(cands, valPrice); array.push(names, "VAL")
+        if not na(devPOC) and devPOC  < entry
+            array.push(cands, devPOC); array.push(names, "dPOC")
+        if not na(pocPrice) and pocPrice < entry
+            array.push(cands, pocPrice); array.push(names, "VP POC")
+        if not na(pwL)    and pwL    < entry
+            array.push(cands, pwL);    array.push(names, "PWL")
         if showMonthlyHL and not na(pmL) and pmL < entry
-            array.push(cands, pmL)
-            array.push(names, "PML")
-        if not na(atl)   and atl   < entry
-            array.push(cands, atl)
-            array.push(names, "ATL(vis)")
-        for i = 0 to array.size(lvnPx) - 1
-            p = array.get(lvnPx, i)
-            if p < entry
-                array.push(cands, p)
-                array.push(names, "LVN below")
+            array.push(cands, pmL);    array.push(names, "PML")
+        if not na(atl)    and atl    < entry
+            array.push(cands, atl);    array.push(names, "ATL(vis)")
+        nL = array.size(lvnPx)
+        if nL > 0
+            for i = 0 to nL - 1
+                p = array.get(lvnPx, i)
+                if p < entry
+                    array.push(cands, p)
+                    array.push(names, "LVN below")
     bestP = float(na)
     bestR = ""
     bestD = 1e20
-    for i = 0 to array.size(cands) - 1
-        p = array.get(cands, i)
-        rr = risk > 0 ? math.abs(p - entry) / risk : 0
-        if rr >= minRR
-            d = math.abs(p - entry)
-            if d < bestD
-                bestD := d
-                bestP := p
-                bestR := array.get(names, i)
+    nC = array.size(cands)
+    if nC > 0
+        for i = 0 to nC - 1
+            p  = array.get(cands, i)
+            rr = risk > 0 ? math.abs(p - entry) / risk : 0.0
+            if rr >= minRR
+                d = math.abs(p - entry)
+                if d < bestD
+                    bestD := d
+                    bestP := p
+                    bestR := array.get(names, i)
     [bestP, bestR]
 
-// Wrap the if/else-if/else into a function so we can destructure the tuple
-// return cleanly (Pine v6 ternaries don't support tuple branches).
 chooseTarget(bool isL, bool isS, float pe, float pr) =>
     if isL
-        pickTarget(true, pe, pr)
+        pickTarget(true,  pe, pr)
     else if isS
         pickTarget(false, pe, pr)
     else
@@ -503,18 +641,51 @@ chooseTarget(bool isL, bool isS, float pe, float pr) =>
 
 [structTP, tpReason] = chooseTarget(isLong, isShort, provisionalEntry, structRisk)
 
-finalTP =
-   not na(structTP) ? structTP :
-   isLong  ? provisionalEntry + atr * fallbackTP :
-   isShort ? provisionalEntry - atr * fallbackTP : float(na)
-finalTPReason = not na(structTP) ? tpReason : (isLong or isShort ? "ATR fallback" : "—")
+finalTP = not na(structTP) ? structTP :
+          isLong  ? provisionalEntry + atr * fallbackTP :
+          isShort ? provisionalEntry - atr * fallbackTP : float(na)
+finalTPReason = not na(structTP) ? tpReason :
+                (isLong or isShort ? "ATR fallback" : "—")
 
 risk   = not na(structRisk) ? structRisk : float(na)
 reward = not na(finalTP) ? math.abs(finalTP - provisionalEntry) : float(na)
 rr     = not na(risk) and risk > 0 ? reward / risk : float(na)
 
+// ===== STATE MACHINE =========================================================
+goLong  = longSetup  and (grade == "A+" or grade == "A")
+goShort = shortSetup and (grade == "A+" or grade == "A")
+staged  = atLevel and bias != 0 and not inHVN and score >= total - 2 and not goLong and not goShort
+
+// CAUTION: had a GO signal this session, conditions now deteriorating
+var bool hadGoLong  = false
+var bool hadGoShort = false
+if isNewDay
+    hadGoLong  := false
+    hadGoShort := false
+if goLong
+    hadGoLong  := true
+if goShort
+    hadGoShort := true
+
+cautionLong  = hadGoLong  and (exhaustionTop or bias != 1  or not stackedUp)
+cautionShort = hadGoShort and (exhaustionBot or bias != -1 or not stackedDn)
+caution      = cautionLong or cautionShort
+
+state = goLong or goShort ? "SIGNALED" :
+        caution            ? "CAUTION"  :
+        staged             ? "STAGED"   :
+        watching           ? "WATCHING" : "IDLE"
+
+showTrade = state == "SIGNALED" or state == "STAGED"
+
+// Edge triggers for alerts
+watchingEdge = watching and not watching[1]
+stagedEdge   = staged   and not staged[1]
+cautionEdge  = caution  and not caution[1]
+
 // ===== DRAWING (last bar only) ===============================================
 if barstate.islast
+    // Clear all managed objects
     clearBoxes(vpBoxes)
     clearLines(ledgeLines)
     clearLines(lvnLines)
@@ -529,56 +700,95 @@ if barstate.islast
     if not na(devPocLabel)
         label.delete(devPocLabel)
         devPocLabel := na
+    if not na(vahLine)
+        line.delete(vahLine)
+        vahLine := na
+    if not na(valLine)
+        line.delete(valLine)
+        valLine := na
+    if not na(vahLab)
+        label.delete(vahLab)
+        vahLab := na
+    if not na(valLab)
+        label.delete(valLab)
+        valLab := na
+    if not na(entryLine)
+        line.delete(entryLine)
+        entryLine := na
+    if not na(stopLine)
+        line.delete(stopLine)
+        stopLine := na
+    if not na(tpLine)
+        line.delete(tpLine)
+        tpLine := na
+    if not na(entryLab)
+        label.delete(entryLab)
+        entryLab := na
+    if not na(stopLab)
+        label.delete(stopLab)
+        stopLab := na
+    if not na(tpLab)
+        label.delete(tpLab)
+        tpLab := na
 
-    // Profile boxes — anchored OFFSET-RIGHT so they don't sit on candles.
+    // Profile bars — anchored on the RIGHT, growing leftward (mirror of MotiveWave-style
+    // right-side fixed-range VP). POC = widest + brightest bar.
     if showVP and not na(topP) and not na(pocVol) and pocVol > 0
-        binSize = (topP - botP) / nbins
-        leftAnchor = bar_index + profileOffset
+        binSize     = (topP - botP) / nbins
+        rightAnchor = bar_index + profileOffset
         for i = 0 to nbins - 1
             v = array.get(bins, i)
             if v > 0
-                ratio = v / pocVol
-                w = math.max(1, math.floor(profileWidth * ratio))
-                p = array.get(binPrice, i)
-                isPOCi = i == array.indexof(bins, pocVol)
-                isHVNi = ratio >= hvnPct
-                isLVNi = ratio <= lvnPct
-                col = isPOCi ? color.new(color.yellow, 0)
-                  : isHVNi ? color.new(color.aqua,   30)
-                  : isLVNi ? color.new(color.red,    50)
-                  : color.new(color.gray,  75)
-                bx = box.new(left=leftAnchor, top=p + binSize/2,
-                     right=leftAnchor + w, bottom=p - binSize/2,
-                     bgcolor=col, border_color=col)
+                ratio  = v / pocVol
+                w      = math.max(1, math.floor(profileWidth * ratio))
+                p      = array.get(binPrice, i)
+                // Lower min-transparency floor so low-volume bins are still visible
+                transp = math.max(15, math.round(85 - 70 * ratio))
+                bx = box.new(left=rightAnchor - w, top=p + binSize / 2,
+                     right=rightAnchor, bottom=p - binSize / 2,
+                     bgcolor=color.new(color.white, transp),
+                     border_color=color.new(color.white, 90))
                 array.push(vpBoxes, bx)
 
     leftX = math.max(0, bar_index - primaryLB)
-    if showLedge
-        for i = 0 to array.size(ledgePx) - 1
+
+    // Level lines
+    nLed = array.size(ledgePx)
+    if showLedge and nLed > 0
+        for i = 0 to nLed - 1
             p = array.get(ledgePx, i)
             ln = line.new(leftX, p, bar_index, p,
                  color=color.new(color.orange, 0), width=2, extend=extend.right)
             array.push(ledgeLines, ln)
-            lb = label.new(bar_index, p, "Ledge", style=label.style_label_left,
-                 color=color.new(color.orange, 80), textcolor=color.orange,
-                 size=size.tiny)
-            array.push(sessionLabs, lb)
-    if showLVN
-        for i = 0 to array.size(lvnPx) - 1
+    nLvn = array.size(lvnPx)
+    if showLVN and nLvn > 0
+        for i = 0 to nLvn - 1
             p = array.get(lvnPx, i)
             ln = line.new(leftX, p, bar_index, p,
                  color=color.new(color.red, 50), style=line.style_dotted, extend=extend.right)
             array.push(lvnLines, ln)
-            lb = label.new(bar_index, p, "LVN", style=label.style_label_left,
-                 color=color.new(color.red, 80), textcolor=color.red,
-                 size=size.tiny)
-            array.push(sessionLabs, lb)
-    if showHVN
-        for i = 0 to array.size(hvnPx) - 1
+    nHvn = array.size(hvnPx)
+    if showHVN and nHvn > 0
+        for i = 0 to nHvn - 1
             p = array.get(hvnPx, i)
             ln = line.new(leftX, p, bar_index, p,
                  color=color.new(color.aqua, 80), style=line.style_dashed, extend=extend.right)
             array.push(hvnLines, ln)
+
+    // VAH / VAL — teal, labeled always (only 2 lines)
+    if showVA
+        if not na(vahPrice)
+            vahLine := line.new(leftX, vahPrice, bar_index, vahPrice,
+                 color=color.new(color.teal, 0), width=2, extend=extend.right)
+            vahLab := label.new(bar_index, vahPrice, "VAH",
+                 style=label.style_label_left, textcolor=color.teal,
+                 color=color.new(color.black, 70), size=size.small)
+        if not na(valPrice)
+            valLine := line.new(leftX, valPrice, bar_index, valPrice,
+                 color=color.new(color.teal, 0), width=2, extend=extend.right)
+            valLab := label.new(bar_index, valPrice, "VAL",
+                 style=label.style_label_left, textcolor=color.teal,
+                 color=color.new(color.black, 70), size=size.small)
 
     // Multi-VP POC overlay
     if mode == "All"
@@ -596,138 +806,157 @@ if barstate.islast
              style=label.style_label_left, textcolor=color.yellow,
              color=color.new(color.black, 70), size=size.small)
 
-    // Session levels
+    // Session / HTF levels — line always drawn, label only within 5 ATR
     if showPDHL
-        drawHLine(pdH, color.silver, "PDH", sessionLines, sessionLabs)
-        drawHLine(pdL, color.silver, "PDL", sessionLines, sessionLabs)
+        drawHLine(pdH, color.silver, "PDH", nearLabel(pdH, close, atr), sessionLines, sessionLabs)
+        drawHLine(pdL, color.silver, "PDL", nearLabel(pdL, close, atr), sessionLines, sessionLabs)
     if showSessHL
-        drawHLine(asiaH, color.new(#7e57c2, 0), "AsiaH", sessionLines, sessionLabs)
-        drawHLine(asiaL, color.new(#7e57c2, 0), "AsiaL", sessionLines, sessionLabs)
-        drawHLine(lonH,  color.new(#26a69a, 0), "LonH",  sessionLines, sessionLabs)
-        drawHLine(lonL,  color.new(#26a69a, 0), "LonL",  sessionLines, sessionLabs)
-        drawHLine(nyH,   color.new(#42a5f5, 0), "NYH",   sessionLines, sessionLabs)
-        drawHLine(nyL,   color.new(#42a5f5, 0), "NYL",   sessionLines, sessionLabs)
+        drawHLine(asiaH, color.new(#7e57c2, 0), "AsiaH", nearLabel(asiaH, close, atr), sessionLines, sessionLabs)
+        drawHLine(asiaL, color.new(#7e57c2, 0), "AsiaL", nearLabel(asiaL, close, atr), sessionLines, sessionLabs)
+        drawHLine(lonH,  color.new(#26a69a, 0), "LonH",  nearLabel(lonH,  close, atr), sessionLines, sessionLabs)
+        drawHLine(lonL,  color.new(#26a69a, 0), "LonL",  nearLabel(lonL,  close, atr), sessionLines, sessionLabs)
+        drawHLine(nyH,   color.new(#42a5f5, 0), "NYH",   nearLabel(nyH,   close, atr), sessionLines, sessionLabs)
+        drawHLine(nyL,   color.new(#42a5f5, 0), "NYL",   nearLabel(nyL,   close, atr), sessionLines, sessionLabs)
     if showWeeklyHL
-        drawHLine(pwH, color.new(#bdbdbd, 30), "PWH", sessionLines, sessionLabs)
-        drawHLine(pwL, color.new(#bdbdbd, 30), "PWL", sessionLines, sessionLabs)
+        drawHLine(pwH, color.new(#bdbdbd, 30), "PWH", nearLabel(pwH, close, atr), sessionLines, sessionLabs)
+        drawHLine(pwL, color.new(#bdbdbd, 30), "PWL", nearLabel(pwL, close, atr), sessionLines, sessionLabs)
     if showMonthlyHL
-        drawHLine(pmH, color.new(#9e9e9e, 30), "PMH", sessionLines, sessionLabs)
-        drawHLine(pmL, color.new(#9e9e9e, 30), "PML", sessionLines, sessionLabs)
+        drawHLine(pmH, color.new(#9e9e9e, 30), "PMH", nearLabel(pmH, close, atr), sessionLines, sessionLabs)
+        drawHLine(pmL, color.new(#9e9e9e, 30), "PML", nearLabel(pmL, close, atr), sessionLines, sessionLabs)
     if showATH
-        drawHLine(ath, color.new(#ffeb3b, 50), "ATH(v)", sessionLines, sessionLabs)
-        drawHLine(atl, color.new(#ffeb3b, 50), "ATL(v)", sessionLines, sessionLabs)
+        drawHLine(ath, color.new(#ffeb3b, 50), "ATH(v)", nearLabel(ath, close, atr), sessionLines, sessionLabs)
+        drawHLine(atl, color.new(#ffeb3b, 50), "ATL(v)", nearLabel(atl, close, atr), sessionLines, sessionLabs)
 
-// ===== ON-CANDLE EXHAUSTION / ABSORPTION MARKERS =============================
+    // Trade level lines — ONLY when STAGED or SIGNALED
+    if showTrade
+        if not na(provisionalEntry)
+            entryLine := line.new(bar_index - 50, provisionalEntry, bar_index, provisionalEntry,
+                 color=color.new(color.white, 0), width=2, style=line.style_solid, extend=extend.right)
+            entryLab := label.new(bar_index, provisionalEntry,
+                 "ENTRY  " + str.tostring(provisionalEntry, format.mintick),
+                 style=label.style_label_left, textcolor=color.white,
+                 color=color.new(color.black, 60), size=size.small)
+        if not na(structStop)
+            stopLine := line.new(bar_index - 50, structStop, bar_index, structStop,
+                 color=color.new(color.red, 0), width=1, style=line.style_dashed, extend=extend.right)
+            stopLab := label.new(bar_index, structStop,
+                 "STOP  " + str.tostring(structStop, format.mintick) + "  ·  " + structStopReason,
+                 style=label.style_label_left, textcolor=color.red,
+                 color=color.new(color.black, 60), size=size.small)
+        if not na(finalTP)
+            tpLine := line.new(bar_index - 50, finalTP, bar_index, finalTP,
+                 color=color.new(color.lime, 0), width=1, style=line.style_dashed, extend=extend.right)
+            tpLab := label.new(bar_index, finalTP,
+                 "TP  " + str.tostring(finalTP, format.mintick) + "  ·  " + finalTPReason,
+                 style=label.style_label_left, textcolor=color.lime,
+                 color=color.new(color.black, 60), size=size.small)
+
+// ===== ON-CANDLE EXHAUSTION MARKERS ==========================================
 plotshape(markExhaustion and exhaustionTop, "Exh Top",
      style=shape.triangledown, location=location.abovebar,
      color=color.new(color.red, 0), size=size.tiny, text="EX")
 plotshape(markExhaustion and exhaustionBot, "Exh Bot",
      style=shape.triangleup, location=location.belowbar,
      color=color.new(color.lime, 0), size=size.tiny, text="EX")
-plotshape(markAbsorption and absorbBuy and atLVN, "Absorb Buy",
-     style=shape.circle, location=location.belowbar,
-     color=color.new(color.aqua, 0), size=size.tiny, text="AB")
-plotshape(markAbsorption and absorbSell and atLVN, "Absorb Sell",
-     style=shape.circle, location=location.abovebar,
-     color=color.new(color.fuchsia, 0), size=size.tiny, text="AB")
 bgcolor(exhaustionTop ? color.new(color.red, 90) : exhaustionBot ? color.new(color.lime, 90) : na,
      title="Exhaustion bg")
 
 // ===== DASHBOARD =============================================================
-var table dash = table.new(position.top_right, 2, 22,
-     bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+dashPosVal = dashPos == "top_left"      ? position.top_left      :
+             dashPos == "top_center"    ? position.top_center    :
+             dashPos == "top_right"     ? position.top_right     :
+             dashPos == "middle_left"   ? position.middle_left   :
+             dashPos == "middle_center" ? position.middle_center :
+             dashPos == "middle_right"  ? position.middle_right  :
+             dashPos == "bottom_left"   ? position.bottom_left   :
+             dashPos == "bottom_center" ? position.bottom_center :
+                                          position.bottom_right
+var table dash = table.new(dashPosVal, 2, 8,
+     bgcolor=color.new(color.black, 20), border_width=1,
+     border_color=color.new(color.gray, 60))
 
-f_color_bias()  => bias ==  1 ? color.lime : bias == -1 ? color.red : color.yellow
-f_color_side()  => isLong ? color.lime : isShort ? color.red : color.gray
-f_color_grade() => score >= total ? color.lime :
-                   score >= total - 1 ? color.aqua :
-                   score >= total - 2 ? color.yellow : color.gray
-f_fmt(x)        => na(x) ? "—" : str.tostring(x, format.mintick)
-f_check(b)      => b ? "✓" : "✗"
-f_chkColor(b)   => b ? color.lime : color.red
+f_fmt(float x)  => na(x) ? "—" : str.tostring(x, format.mintick)
+f_check(bool b) => b ? "✓" : "✗"
+
+signalText = goLong  ? "GO LONG"   : goShort  ? "GO SHORT" :
+             caution ? "CAUTION"   : staged   ? "STAGED"   :
+             watching ? "WATCHING" : "IDLE"
+
+sideHint = goLong         ? "LONG"           : goShort        ? "SHORT"          :
+           cautionLong    ? "↓ long degr."   : cautionShort   ? "↑ short degr."  :
+           watchingLong   ? "→ LONG lvl"     : watchingShort  ? "→ SHORT lvl"    :
+           bias ==  1     ? "bull-bias"       : bias == -1     ? "bear-bias"      : "—"
+
+signalBg = goLong   ? color.new(color.lime,    20) :
+           goShort  ? color.new(color.red,     20) :
+           caution  ? color.new(color.fuchsia, 30) :
+           staged   ? color.new(color.orange,  30) :
+           watching ? color.new(color.yellow,  40) :
+                      color.new(color.gray,    60)
+signalFg = goLong or goShort or caution or staged ? color.white :
+           watching ? color.black : color.silver
+
+confluenceStr = f_check(c1) + f_check(c2) + f_check(c3) + f_check(c4) +
+                f_check(c5) + f_check(c6) + (c7Use ? f_check(c7) : "·")
+
+// Row 3: entry price when STAGED/SIGNALED, approaching-level info when WATCHING
+entryDisplay = showTrade ? f_fmt(provisionalEntry) :
+               watching  ? watchLevelType + " @ " + f_fmt(watchLevelPx) : "—"
+entryLabel3  = showTrade ? "Entry" : watching ? "→ Level" : "—"
 
 if barstate.islast
-    table.cell(dash, 0,  0, "Bias",   text_color=color.white, bgcolor=color.new(color.gray,40))
-    table.cell(dash, 1,  0, biasText, text_color=f_color_bias(), bgcolor=color.new(color.gray,60))
-    table.cell(dash, 0,  1, "Setup",  text_color=color.white)
-    table.cell(dash, 1,  1, sideHint, text_color=f_color_side())
-    table.cell(dash, 0,  2, "Grade",  text_color=color.white)
-    table.cell(dash, 1,  2, grade + " (" + str.tostring(score) + "/" + str.tostring(total) + ")",
-         text_color=f_color_grade())
-    table.cell(dash, 0,  3, "1. HTF bias",        text_color=color.white)
-    table.cell(dash, 1,  3, f_check(c1) + " " + biasText, text_color=f_chkColor(c1))
-    table.cell(dash, 0,  4, "2. At level",        text_color=color.white)
-    table.cell(dash, 1,  4, f_check(c2) + " " + (atLedge ? "Ledge" : atLVN ? "LVN" : "—"),
-         text_color=f_chkColor(c2))
-    table.cell(dash, 0,  5, "3. Aligned w/ bias", text_color=color.white)
-    table.cell(dash, 1,  5, f_check(c3),          text_color=f_chkColor(c3))
-    table.cell(dash, 0,  6, "4. Not in HVN",      text_color=color.white)
-    table.cell(dash, 1,  6, f_check(c4),          text_color=f_chkColor(c4))
-    table.cell(dash, 0,  7, "5. Vol regime",      text_color=color.white)
-    volStr = exhaustionTop ? "EXH TOP" :
-             exhaustionBot ? "EXH BOT" :
-             healthyUp     ? "healthy↑" :
-             healthyDn     ? "healthy↓" :
-             absorbBuy     ? "absorb↑" :
-             absorbSell    ? "absorb↓" : "normal"
-    table.cell(dash, 1,  7, f_check(c5) + " " + volStr, text_color=f_chkColor(c5))
-    table.cell(dash, 0,  8, "6. EMA stack",       text_color=color.white)
-    emaStr = stackedUp ? "↑↑↑" : stackedDn ? "↓↓↓" : "mixed"
-    table.cell(dash, 1,  8, f_check(c6) + " " + emaStr, text_color=f_chkColor(c6))
-    table.cell(dash, 0,  9, "7. VWAP align",      text_color=color.white)
-    vwapStr = priceAboveVWAP ? "above" : priceBelowVWAP ? "below" : "at"
-    table.cell(dash, 1,  9, c7Use ? f_check(c7) + " " + vwapStr : "off",
-         text_color=c7Use ? f_chkColor(c7) : color.gray)
-    table.cell(dash, 0, 10, "Entry",  text_color=color.white)
-    table.cell(dash, 1, 10, f_fmt(provisionalEntry))
-    table.cell(dash, 0, 11, "Stop",   text_color=color.white)
-    table.cell(dash, 1, 11, f_fmt(structStop) + "  (" + structStopReason + ")",
-         text_color=color.red)
-    table.cell(dash, 0, 12, "Target", text_color=color.white)
-    table.cell(dash, 1, 12, f_fmt(finalTP) + "  (" + finalTPReason + ")",
-         text_color=color.lime)
-    table.cell(dash, 0, 13, "R:R",    text_color=color.white)
-    table.cell(dash, 1, 13, na(rr) ? "—" : str.tostring(rr, "#.##"))
-    table.cell(dash, 0, 14, "POC (HTF)",   text_color=color.white)
-    table.cell(dash, 1, 14, f_fmt(pocPrice), text_color=color.yellow)
-    table.cell(dash, 0, 15, "dPOC (today)", text_color=color.white)
-    table.cell(dash, 1, 15, f_fmt(devPOC),   text_color=color.yellow)
-    table.cell(dash, 0, 16, "VWAP",   text_color=color.white)
-    table.cell(dash, 1, 16, f_fmt(vwapMid),
-         text_color=priceAboveVWAP ? color.lime : color.red)
-    table.cell(dash, 0, 17, "PDH/PDL", text_color=color.white)
-    table.cell(dash, 1, 17, f_fmt(pdH) + " / " + f_fmt(pdL))
-    table.cell(dash, 0, 18, "NY H/L",  text_color=color.white)
-    table.cell(dash, 1, 18, f_fmt(nyH) + " / " + f_fmt(nyL))
-    table.cell(dash, 0, 19, "Asia H/L",text_color=color.white)
-    table.cell(dash, 1, 19, f_fmt(asiaH) + " / " + f_fmt(asiaL))
-    table.cell(dash, 0, 20, "Lookback",text_color=color.white)
-    table.cell(dash, 1, 20, str.tostring(primaryDays) + "d / " + str.tostring(primaryLB) + "b" +
-         (mode == "All" ? "  (+All POCs)" : ""))
-    table.cell(dash, 0, 21, "Symbol",  text_color=color.white)
-    table.cell(dash, 1, 21, sym + (isNQ ? " [NQ]" : isGC ? " [GC]" : ""))
+    table.cell(dash, 0, 0, signalText, text_color=signalFg, bgcolor=signalBg, text_size=size.large)
+    table.cell(dash, 1, 0, sideHint,   text_color=signalFg, bgcolor=signalBg, text_size=size.large)
+
+    table.cell(dash, 0, 1, "Grade", text_color=color.silver)
+    gradeColor = grade == "A+" ? color.lime : grade == "A" ? color.aqua :
+                 grade == "B+" ? color.yellow : color.gray
+    table.cell(dash, 1, 1,
+         grade + "  " + str.tostring(score) + "/" + str.tostring(total),
+         text_color=gradeColor)
+
+    table.cell(dash, 0, 2, "Conf", text_color=color.silver)
+    table.cell(dash, 1, 2, confluenceStr, text_color=color.white, text_size=size.normal)
+
+    table.cell(dash, 0, 3, entryLabel3, text_color=color.silver)
+    table.cell(dash, 1, 3, entryDisplay, text_color=color.white)
+
+    table.cell(dash, 0, 4, showTrade ? "Stop" : "—", text_color=color.silver)
+    table.cell(dash, 1, 4,
+         showTrade ? f_fmt(structStop) + "  ·  " + structStopReason : "—",
+         text_color=showTrade ? color.new(color.red, 0) : color.gray)
+
+    table.cell(dash, 0, 5, showTrade ? "Target" : "—", text_color=color.silver)
+    table.cell(dash, 1, 5,
+         showTrade ? f_fmt(finalTP) + "  ·  " + finalTPReason : "—",
+         text_color=showTrade ? color.new(color.lime, 0) : color.gray)
+
+    table.cell(dash, 0, 6, "R:R", text_color=color.silver)
+    rrColor = na(rr) ? color.gray : rr >= 2.0 ? color.lime : rr >= 1.5 ? color.yellow : color.red
+    table.cell(dash, 1, 6,
+         showTrade and not na(rr) ? str.tostring(rr, "#.##") : "—",
+         text_color=rrColor)
+
+    table.cell(dash, 0, 7, "Note", text_color=color.silver)
+    table.cell(dash, 1, 7,
+         str.tostring(primaryDays) + "d  ·  " + sym + "  ·  " + biasText,
+         text_color=color.gray)
 
 // ===== ALERTS ================================================================
-alertcondition(longSetup  and grade == "A+", "A+ Long",  "JVS A+ Long setup at level")
-alertcondition(shortSetup and grade == "A+", "A+ Short", "JVS A+ Short setup at level")
-alertcondition(longSetup  and (grade == "A" or grade == "A+"),  "A/A+ Long",  "JVS A/A+ Long setup")
-alertcondition(shortSetup and (grade == "A" or grade == "A+"),  "A/A+ Short", "JVS A/A+ Short setup")
-alertcondition(exhaustionTop, "Exhaustion Top", "JVS volume-spike exhaustion top")
-alertcondition(exhaustionBot, "Exhaustion Bot", "JVS volume-spike exhaustion bottom")
-alertcondition(absorbBuy and atLVN,  "Absorption buy at LVN",  "JVS absorption-proxy buy at LVN/Ledge")
-alertcondition(absorbSell and atLVN, "Absorption sell at LVN", "JVS absorption-proxy sell at LVN/Ledge")
+alertcondition(watchingEdge,                              "Approaching Level",  "JVS: approaching level — watch footprint in MotiveWave")
+alertcondition(stagedEdge,                                "Setup Staged B+",    "JVS: B+ or better at level — wait for trigger")
+alertcondition(goLong  and grade == "A+",                 "A+ Long",            "JVS A+ Long setup at level")
+alertcondition(goShort and grade == "A+",                 "A+ Short",           "JVS A+ Short setup at level")
+alertcondition(goLong  and (grade == "A" or grade == "A+"), "A/A+ Long",        "JVS A/A+ Long setup")
+alertcondition(goShort and (grade == "A" or grade == "A+"), "A/A+ Short",       "JVS A/A+ Short setup")
+alertcondition(cautionEdge,                               "Setup Degrading",    "JVS: setup conditions deteriorating — review position")
+alertcondition(exhaustionTop,                             "Exhaustion Top",     "JVS: volume-spike exhaustion top")
+alertcondition(exhaustionBot,                             "Exhaustion Bot",     "JVS: volume-spike exhaustion bottom")
 
 // ===== PLOTS =================================================================
-plot(provisionalEntry, "Entry",
-     color=isLong or isShort ? color.new(color.white, 0) : na,
-     style=plot.style_circles, linewidth=2)
-plot(structStop, "Stop",
-     color=isLong or isShort ? color.new(color.red, 0) : na,
-     style=plot.style_circles, linewidth=2)
-plot(finalTP, "Target",
-     color=isLong or isShort ? color.new(color.lime, 0) : na,
-     style=plot.style_circles, linewidth=2)
-
+// EMAs and VWAP — always on.
+// Entry/stop/target are drawn as labeled horizontal LINES in the barstate.islast
+// block above, not as per-bar circles, so they only appear when STAGED or SIGNALED.
 plot(ema1, "EMA 9",   color=color.new(color.yellow,   0), linewidth=1)
 plot(ema2, "EMA 21",  color=color.new(color.orange,   0), linewidth=1)
 plot(ema3, "EMA 50",  color=color.new(color.aqua,    20), linewidth=2)
