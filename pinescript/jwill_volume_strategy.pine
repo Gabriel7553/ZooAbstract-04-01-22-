@@ -494,21 +494,37 @@ getStructStop(bool isLng, float ent, float atrV, float bufM, bool useM) =>
     cap = atrV * 3.0
     if isLng
         if not na(nyL)   and nyL   < ent and (ent - nyL)   < bd and (ent - nyL)   <= cap
-            bd := ent - nyL;   bp := nyL;   bn := "below NYL"
+            bd := ent - nyL
+            bp := nyL
+            bn := "below NYL"
         if not na(lonL)  and lonL  < ent and (ent - lonL)  < bd and (ent - lonL)  <= cap
-            bd := ent - lonL;  bp := lonL;  bn := "below LonL"
+            bd := ent - lonL
+            bp := lonL
+            bn := "below LonL"
         if not na(asiaL) and asiaL < ent and (ent - asiaL) < bd and (ent - asiaL) <= cap
-            bd := ent - asiaL; bp := asiaL; bn := "below AsiaL"
+            bd := ent - asiaL
+            bp := asiaL
+            bn := "below AsiaL"
         if not na(valPrice) and valPrice < ent and (ent - valPrice) < bd and (ent - valPrice) <= cap
-            bd := ent - valPrice; bp := valPrice; bn := "below VAL"
+            bd := ent - valPrice
+            bp := valPrice
+            bn := "below VAL"
         if not na(pdL)   and pdL   < ent and (ent - pdL)   < bd and (ent - pdL)   <= cap
-            bd := ent - pdL;   bp := pdL;   bn := "below PDL"
+            bd := ent - pdL
+            bp := pdL
+            bn := "below PDL"
         if not na(pwL)   and pwL   < ent and (ent - pwL)   < bd and (ent - pwL)   <= cap
-            bd := ent - pwL;   bp := pwL;   bn := "below PWL"
+            bd := ent - pwL
+            bp := pwL
+            bn := "below PWL"
         if useM and not na(pmL) and pmL < ent and (ent - pmL) < bd and (ent - pmL) <= cap
-            bd := ent - pmL;   bp := pmL;   bn := "below PML"
+            bd := ent - pmL
+            bp := pmL
+            bn := "below PML"
         if not na(atl)   and atl   < ent and (ent - atl)   < bd and (ent - atl)   <= cap
-            bd := ent - atl;   bp := atl;   bn := "below ATL(v)"
+            bd := ent - atl
+            bp := atl
+            bn := "below ATL(v)"
         nL = array.size(lvnPx)
         if nL > 0
             for i = 0 to nL - 1
@@ -516,24 +532,42 @@ getStructStop(bool isLng, float ent, float atrV, float bufM, bool useM) =>
                 if p < ent
                     d = ent - p
                     if d < bd and d <= cap
-                        bd := d; bp := p; bn := "LVN structural"
+                        bd := d
+                        bp := p
+                        bn := "LVN structural"
     else
         if not na(nyH)   and nyH   > ent and (nyH   - ent) < bd and (nyH   - ent) <= cap
-            bd := nyH   - ent; bp := nyH;   bn := "above NYH"
+            bd := nyH   - ent
+            bp := nyH
+            bn := "above NYH"
         if not na(lonH)  and lonH  > ent and (lonH  - ent) < bd and (lonH  - ent) <= cap
-            bd := lonH  - ent; bp := lonH;  bn := "above LonH"
+            bd := lonH  - ent
+            bp := lonH
+            bn := "above LonH"
         if not na(asiaH) and asiaH > ent and (asiaH - ent) < bd and (asiaH - ent) <= cap
-            bd := asiaH - ent; bp := asiaH; bn := "above AsiaH"
+            bd := asiaH - ent
+            bp := asiaH
+            bn := "above AsiaH"
         if not na(vahPrice) and vahPrice > ent and (vahPrice - ent) < bd and (vahPrice - ent) <= cap
-            bd := vahPrice - ent; bp := vahPrice; bn := "above VAH"
+            bd := vahPrice - ent
+            bp := vahPrice
+            bn := "above VAH"
         if not na(pdH)   and pdH   > ent and (pdH   - ent) < bd and (pdH   - ent) <= cap
-            bd := pdH   - ent; bp := pdH;   bn := "above PDH"
+            bd := pdH   - ent
+            bp := pdH
+            bn := "above PDH"
         if not na(pwH)   and pwH   > ent and (pwH   - ent) < bd and (pwH   - ent) <= cap
-            bd := pwH   - ent; bp := pwH;   bn := "above PWH"
+            bd := pwH   - ent
+            bp := pwH
+            bn := "above PWH"
         if useM and not na(pmH) and pmH > ent and (pmH - ent) < bd and (pmH - ent) <= cap
-            bd := pmH   - ent; bp := pmH;   bn := "above PMH"
+            bd := pmH   - ent
+            bp := pmH
+            bn := "above PMH"
         if not na(ath)   and ath   > ent and (ath   - ent) < bd and (ath   - ent) <= cap
-            bd := ath   - ent; bp := ath;   bn := "above ATH(v)"
+            bd := ath   - ent
+            bp := ath
+            bn := "above ATH(v)"
         nL = array.size(lvnPx)
         if nL > 0
             for i = 0 to nL - 1
@@ -541,7 +575,9 @@ getStructStop(bool isLng, float ent, float atrV, float bufM, bool useM) =>
                 if p > ent
                     d = p - ent
                     if d < bd and d <= cap
-                        bd := d; bp := p; bn := "LVN structural"
+                        bd := d
+                        bp := p
+                        bn := "LVN structural"
     stopPx = not na(bp) ? (isLng ? bp - atrV * bufM : bp + atrV * bufM) :
              (isLng ? ent - atrV : ent + atrV)
     [stopPx, bn]
