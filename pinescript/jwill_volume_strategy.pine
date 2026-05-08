@@ -780,21 +780,22 @@ if barstate.islast
         label.delete(tpLab)
         tpLab := na
 
-    // Profile bars — anchored on the RIGHT, growing leftward (mirror of MotiveWave-style
-    // right-side fixed-range VP). POC = widest + brightest bar.
-    if showVP and not na(topP) and not na(pocVol) and pocVol > 0
-        binSize     = (topP - botP) / nbins
-        rightAnchor = bar_index + profileOffset
+    // Profile bars — LEFT-anchored at the start of the lookback window, bars grow
+    // rightward. Keeps the VP in the historical section of the chart so it never
+    // overlaps current candles. profileOffset nudges the anchor left (away from
+    // the very first bar) for visual breathing room.
+    if showVP and not na(topP) and not na(botP) and not na(pocVol) and pocVol > 0 and topP > botP
+        binSize    = (topP - botP) / nbins
+        vpLeft     = math.max(0, bar_index - primaryLB) + profileOffset
         for i = 0 to nbins - 1
             v = array.get(bins, i)
             if v > 0
                 ratio  = v / pocVol
                 w      = math.max(1, math.floor(profileWidth * ratio))
                 p      = array.get(binPrice, i)
-                // Lower min-transparency floor so low-volume bins are still visible
                 transp = math.max(15, math.round(85 - 70 * ratio))
-                bx = box.new(left=rightAnchor - w, top=p + binSize / 2,
-                     right=rightAnchor, bottom=p - binSize / 2,
+                bx = box.new(left=vpLeft, top=p + binSize / 2,
+                     right=vpLeft + w, bottom=p - binSize / 2,
                      bgcolor=color.new(color.white, transp),
                      border_color=color.new(color.white, 90))
                 array.push(vpBoxes, bx)

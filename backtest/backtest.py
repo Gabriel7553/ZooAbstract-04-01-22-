@@ -61,21 +61,28 @@ def load_csv(path: str) -> list[Bar]:
                 t_raw = row.get("time") or row.get("Time") or row.get("date") or row.get("Date")
                 t = None
                 if t_raw:
-                    t_clean = t_raw.replace("Z", "+00:00")
+                    # Unix epoch integer (TradingView "time" column)
                     try:
-                        t = datetime.fromisoformat(t_clean)
-                    except ValueError:
+                        ts = int(float(t_raw))
+                        t = datetime.fromtimestamp(ts)
+                    except (ValueError, OSError):
+                        t_clean = t_raw.replace("Z", "+00:00")
                         try:
-                            t = datetime.strptime(t_raw, "%Y-%m-%d %H:%M:%S")
+                            t = datetime.fromisoformat(t_clean)
                         except ValueError:
-                            t = None
+                            try:
+                                t = datetime.strptime(t_raw, "%Y-%m-%d %H:%M:%S")
+                            except ValueError:
+                                t = None
+                # TradingView exports volume as last column, sometimes capitalized
+                vol_raw = (row.get("Volume") or row.get("volume") or "0").strip()
                 bars.append(Bar(
                     t=t,
                     o=float(row["open"]),
                     h=float(row["high"]),
                     l=float(row["low"]),
                     c=float(row["close"]),
-                    v=float(row.get("volume", 0) or 0),
+                    v=float(vol_raw) if vol_raw else 0.0,
                 ))
             except (KeyError, ValueError):
                 continue
@@ -393,7 +400,10 @@ def run(bars: list[Bar], cfg) -> list[Trade]:
         c2 = at_level
         c3 = long_setup or short_setup
         c4 = not in_hvn
-        c5 = exh_top or exh_bot or True  # simplification — assume regime ok on close-bar
+        price_slope = b.c - bars[max(0, i - 10)].c if i >= 10 else 0.0
+        healthy_up = price_slope > 0
+        healthy_dn = price_slope < 0
+        c5 = (bias == 1 and (healthy_up or exh_bot)) or (bias == -1 and (healthy_dn or exh_top))
         c6 = (bias == 1 and stacked_up) or (bias == -1 and stacked_dn)
         c7 = (bias == 1 and b.c > vw) or (bias == -1 and b.c < vw)
         score = sum([c1, c2, c3, c4, c5, c6, c7])
@@ -500,6 +510,15 @@ def report(trades: list[Trade]):
         w = sum(1 for t in rs if t.result == "WIN") / len(rs)
         a = mean(t.rr_realized for t in rs)
         print(f"{g:<6} {len(rs):>4} {w*100:>5.1f}% {a:>6.2f}")
+    print()
+    print(f"{'dir':<6} {'n':>4} {'WR':>6} {'avgR':>6}")
+    for d in ("LONG", "SHORT"):
+        rs = [t for t in trades if t.direction == d and t.result]
+        if not rs:
+            continue
+        w = sum(1 for t in rs if t.result == "WIN") / len(rs)
+        a = mean(t.rr_realized for t in rs)
+        print(f"{d:<6} {len(rs):>4} {w*100:>5.1f}% {a:>6.2f}")
     print()
     by_reason: dict[str, list[Trade]] = defaultdict(list)
     for t in trades:
