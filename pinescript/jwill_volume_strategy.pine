@@ -78,6 +78,7 @@ watchZoneMul = input.float(2.0, "Level watch zone (ATR ×)",    step=0.25, group
 slBufMul     = input.float(0.25,"Stop buffer beyond level (ATR ×)", step=0.05, group=gSet)
 minRR        = input.float(1.5, "Minimum acceptable R:R", step=0.1, group=gSet)
 fallbackTP   = input.float(2.5, "Fallback TP (ATR ×) if no structural target", step=0.1, group=gSet)
+requireHTF   = input.bool(true, "Require daily EMA alignment for GO signal", group=gSet)
 
 markExhaustion = input.bool(true, "Mark exhaustion candles on chart", group=gDraw)
 dashPos = input.string("top_right", "Dashboard position",
@@ -385,6 +386,15 @@ healthyDn  = priceSlope < 0 and volSlope < 0
 
 bias     = trendUp and not exhaustionTop ?  1 : trendDn and not exhaustionBot ? -1 : 0
 biasText = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
+
+// ===== DAILY EMA BIAS (HTF gate for GO signal) ===============================
+// Checks daily 9 EMA vs 200 EMA — a simple but stable daily-trend gate.
+// If requireHTF is on, GO LONG only fires when daily is bullish and vice-versa.
+htfE1D = request.security(syminfo.tickerid, "D", ta.ema(close, 9),   lookahead=barmerge.lookahead_off)
+htfE4D = request.security(syminfo.tickerid, "D", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+htfBull    = not na(htfE1D) and not na(htfE4D) and htfE1D > htfE4D
+htfBear    = not na(htfE1D) and not na(htfE4D) and htfE1D < htfE4D
+htfBiasStr = htfBull ? "D:BULL" : htfBear ? "D:BEAR" : "D:NEUT"
 
 // ===== HTF LEVELS via security() =============================================
 [pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]],
@@ -704,8 +714,10 @@ reward = not na(finalTP) ? math.abs(finalTP - provisionalEntry) : float(na)
 rr     = not na(risk) and risk > 0 ? reward / risk : float(na)
 
 // ===== STATE MACHINE =========================================================
-goLong  = longSetup  and (grade == "A+" or grade == "A")
-goShort = shortSetup and (grade == "A+" or grade == "A")
+// GO signal requires A or A+ AND (optionally) daily EMA alignment.
+// B+ is WATCH-ONLY: indicator flags it but no entry/stop/target drawn — wait for footprint.
+goLong  = longSetup  and (grade == "A+" or grade == "A") and (not requireHTF or htfBull)
+goShort = shortSetup and (grade == "A+" or grade == "A") and (not requireHTF or htfBear)
 staged  = atLevel and bias != 0 and not inHVN and score >= total - 2 and not goLong and not goShort
 
 // CAUTION: had a GO signal this session, conditions now deteriorating
@@ -725,7 +737,8 @@ caution      = cautionLong or cautionShort
 
 state = goLong or goShort ? "SIGNALED" : caution ? "CAUTION" : staged ? "STAGED" : watching ? "WATCHING" : "IDLE"
 
-showTrade = state == "SIGNALED" or state == "STAGED"
+// Only draw entry/stop/target lines on SIGNALED (A/A+). B+ is watch-only — no lines.
+showTrade = state == "SIGNALED"
 
 // Edge triggers for alerts
 watchingEdge = watching and not watching[1]
@@ -913,14 +926,15 @@ bgcolor(exhaustionTop ? color.new(color.red, 90) : exhaustionBot ? color.new(col
 
 // ===== DASHBOARD =============================================================
 dashPosVal = dashPos == "top_left" ? position.top_left : dashPos == "top_center" ? position.top_center : dashPos == "top_right" ? position.top_right : dashPos == "middle_left" ? position.middle_left : dashPos == "middle_center" ? position.middle_center : dashPos == "middle_right" ? position.middle_right : dashPos == "bottom_left" ? position.bottom_left : dashPos == "bottom_center" ? position.bottom_center : position.bottom_right
-var table dash = table.new(dashPosVal, 2, 8,
+var table dash = table.new(dashPosVal, 2, 9,
      bgcolor=color.new(color.black, 20), border_width=1,
      border_color=color.new(color.gray, 60))
 
 f_fmt(float x)  => na(x) ? "—" : str.tostring(x, format.mintick)
 f_check(bool b) => b ? "✓" : "✗"
 
-signalText = goLong ? "GO LONG" : goShort ? "GO SHORT" : caution ? "CAUTION" : staged ? "STAGED" : watching ? "WATCHING" : "IDLE"
+// B+ staged = "WATCH B+" — not a trade signal; footprint must confirm first.
+signalText = goLong ? "GO LONG" : goShort ? "GO SHORT" : caution ? "CAUTION" : staged ? "WATCH B+" : watching ? "WATCHING" : "IDLE"
 
 sideHint = goLong ? "LONG" : goShort ? "SHORT" : cautionLong ? "↓ long degr." : cautionShort ? "↑ short degr." : watchingLong ? "→ LONG lvl" : watchingShort ? "→ SHORT lvl" : bias == 1 ? "bull-bias" : bias == -1 ? "bear-bias" : "—"
 
@@ -930,10 +944,9 @@ signalFg = goLong or goShort or caution or staged ? color.white : watching ? col
 confluenceStr = f_check(c1) + f_check(c2) + f_check(c3) + f_check(c4) +
                 f_check(c5) + f_check(c6) + (c7Use ? f_check(c7) : "·")
 
-// Row 3: entry price when STAGED/SIGNALED, approaching-level info when WATCHING
-entryDisplay = showTrade ? f_fmt(provisionalEntry) :
-               watching  ? watchLevelType + " @ " + f_fmt(watchLevelPx) : "—"
-entryLabel3  = showTrade ? "Entry" : watching ? "→ Level" : "—"
+// Row 3: entry price when SIGNALED, level info when WATCH B+/WATCHING
+entryDisplay = showTrade ? f_fmt(provisionalEntry) : staged ? levelTypeStr + " @ " + f_fmt(levelPx) + " (watch)" : watching ? watchLevelType + " @ " + f_fmt(watchLevelPx) : "—"
+entryLabel3  = showTrade ? "Entry" : (staged or watching) ? "→ Level" : "—"
 
 if barstate.islast
     table.cell(dash, 0, 0, signalText, text_color=signalFg, bgcolor=signalBg, text_size=size.large)
@@ -968,14 +981,18 @@ if barstate.islast
          showTrade and not na(rr) ? str.tostring(rr, "#.##") : "—",
          text_color=rrColor)
 
-    table.cell(dash, 0, 7, "Note", text_color=color.silver)
-    table.cell(dash, 1, 7,
-         str.tostring(primaryDays) + "d  ·  " + sym + "  ·  " + biasText,
+    table.cell(dash, 0, 7, "D-Bias", text_color=color.silver)
+    htfColor = htfBull ? color.lime : htfBear ? color.red : color.gray
+    table.cell(dash, 1, 7, htfBiasStr + "  ·  " + biasText, text_color=htfColor)
+
+    table.cell(dash, 0, 8, "Note", text_color=color.silver)
+    table.cell(dash, 1, 8,
+         str.tostring(primaryDays) + "d  ·  " + sym,
          text_color=color.gray)
 
 // ===== ALERTS ================================================================
 alertcondition(watchingEdge,                              "Approaching Level",  "JVS: approaching level — watch footprint in MotiveWave")
-alertcondition(stagedEdge,                                "Setup Staged B+",    "JVS: B+ or better at level — wait for trigger")
+alertcondition(stagedEdge,                                "Watch B+ (no trade)", "JVS: B+ at level — open MotiveWave footprint, DO NOT enter without A/A+ or footprint confirm")
 alertcondition(goLong  and grade == "A+",                 "A+ Long",            "JVS A+ Long setup at level")
 alertcondition(goShort and grade == "A+",                 "A+ Short",           "JVS A+ Short setup at level")
 alertcondition(goLong  and (grade == "A" or grade == "A+"), "A/A+ Long",        "JVS A/A+ Long setup")
